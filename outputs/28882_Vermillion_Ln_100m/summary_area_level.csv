@@ -1,0 +1,6 @@
+Metric,Value,Interpretation
+House Elevation,4.95 m,Reference elevation
+Lowest Elevation in 500m,1.58 m,3.37 m above lowest
+Highest Elevation in 500m,13.90 m,8.95 m below highest
+Median Elevation in 500m,4.86 m,Above median
+Elevation Percentile Rank in 500m,60.64%,Above regional median

@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pydantic>=2
+requests
+numpy
+pandas
+shapely
+pyproj
+rasterio
+pdal
+scipy

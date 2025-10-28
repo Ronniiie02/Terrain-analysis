@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uchicago-elevation"
+version = "0.1.0"
+description = "Elevation/terrain analytics with PDAL + USGS 3DEP + OSM"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi",
+  "uvicorn",
+  "pydantic>=2",
+  "requests",
+  "numpy",
+  "pandas",
+  "shapely",
+  "pyproj",
+  "rasterio",
+  "pdal",
+  "scipy",
+  # Optional: enable these locally if you need visualization
+  # "geopandas",
+  # "rioxarray",
+  # "matplotlib",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}

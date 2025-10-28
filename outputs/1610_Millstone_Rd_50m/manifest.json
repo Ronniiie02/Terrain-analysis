@@ -1,0 +1,34 @@
+{
+  "run_id": "1610_Millstone_Rd_50m",
+  "dataset": "USGS_LPC_NY_LongIsland_Z18_2014_LAS_2015",
+  "lat": 40.9856015,
+  "lon": -72.3555398,
+  "aoi_radius_m": 50.0,
+  "house_ground_m": 30.598831168831165,
+  "percentile_rank": 51.76771071380561,
+  "percentile_rank_500m": 50.09098691188267,
+  "address": "1610 Millstone Rd, Sag Harbor, NY 11963, USA",
+  "tables": {
+    "summary_multiscale.csv": "1610_Millstone_Rd_50m/summary_multiscale.csv",
+    "summary_area_level.csv": "1610_Millstone_Rd_50m/summary_area_level.csv",
+    "summary_area_level_user.csv": "1610_Millstone_Rd_50m/summary_area_level_user.csv"
+  },
+  "figs": {
+    "figure1_elevation": "1610_Millstone_Rd_50m/figure1_elevation.png",
+    "figure2_slope": "1610_Millstone_Rd_50m/figure2_slope.png",
+    "figure3_aspect": "1610_Millstone_Rd_50m/figure3_aspect.png",
+    "figure4_terrain_and_hist": "1610_Millstone_Rd_50m/figure4_terrain_and_hist.png",
+    "figure5_6_3d_combo": "1610_Millstone_Rd_50m/figure5_6_3d_combo.html"
+  },
+  "files": [
+    "1610_Millstone_Rd_50m/summary_multiscale.csv",
+    "1610_Millstone_Rd_50m/figure5_6_3d_combo.html",
+    "1610_Millstone_Rd_50m/summary_area_level_user.csv",
+    "1610_Millstone_Rd_50m/figure1_elevation.png",
+    "1610_Millstone_Rd_50m/figure4_terrain_and_hist.png",
+    "1610_Millstone_Rd_50m/figure2_slope.png",
+    "1610_Millstone_Rd_50m/figure3_aspect.png",
+    "1610_Millstone_Rd_50m/summary_area_level.csv",
+    "1610_Millstone_Rd_50m/narrative.txt"
+  ]
+}
