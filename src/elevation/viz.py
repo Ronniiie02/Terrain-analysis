@@ -781,8 +781,8 @@ def figure4_terrain_and_hist(
 # ============================================
 
 def add_3d_figures_to_pipeline(
-    dem_path_user: str,
-    dem_path_500: str,
+    dem_path_user: str,            # ← 这里传 DEM/DTM（用户半径）
+    dem_path_500: str,             # ← 这里传 DEM/DTM（500m 参考）
     house_area_raster,
     pad_ring_raster,
     bands_raster: list,
@@ -794,326 +794,224 @@ def add_3d_figures_to_pipeline(
     outdir=None,
     config=None,
     verbose=True,
+    # === 新增两个可选参数（若不提供，则下排用 DEM 代替 DSM 网格渲染） ===
+    dsm_path_user: str = None,
+    dsm_path_500: str = None,
 ):
     """
-    完全修复：100% 仿照第三份代码生成3D figure + 所有ring
+    目标布局（2x2）：
+      (1,1) Elevation DEM - user
+      (1,2) Elevation DEM - 500m
+      (2,1) Satellite DSM - user
+      (2,2) Satellite DSM - 500m
     """
     try:
-        # 提取参数
+        # 读取配置
         SPEED_MODE = config.get("fig5_6_speed_mode", True) if config else True
         MAX_RINGS_TO_DRAW = config.get("fig5_6_max_rings_to_draw", 3) if config else 3
         MAX_SIZE_USER = config.get("fig5_6_dem_max_size_user", 360) if config else 360
-        MAX_SIZE_REF = config.get("fig5_6_dem_max_size_ref", 420) if config else 420
+        MAX_SIZE_REF  = config.get("fig5_6_dem_max_size_ref", 420) if config else 420
         NAIP_SIZE_USER = config.get("fig5_6_naip_size_user", "1024,1024") if config else "1024,1024"
-        NAIP_SIZE_REF = config.get("fig5_6_naip_size_ref", "1024,1024") if config else "1024,1024"
+        NAIP_SIZE_REF  = config.get("fig5_6_naip_size_ref", "1024,1024") if config else "1024,1024"
         DENSIFY_PX = config.get("fig5_6_densify_px", 2.0) if config else 2.0
         SIMPLIFY_K = config.get("fig5_6_simplify_k", 1.5) if config else 1.5
-        
-        # 颜色和线宽
+        COLOR_SEQ = (config or {}).get("fig5_6_elevation_colorscale", "RdBu_r")
+
         poly_colors = config.get("fig5_6_poly_colors", {}) if config else {}
-        
         COL_FOOT = poly_colors.get("footprint", "#FFD700")
         COL_EDGE = poly_colors.get("edge", "#00E5FF")
         COL_BANDS = poly_colors.get("bands", ["#FF5733", "#33FF77", "#3388FF"])
         COL_POOL = poly_colors.get("pooled", "#FF00FF")
-        
         if SPEED_MODE:
             LW_FOOT, LW_EDGE, LW_BAND, LW_POOL = (4, 3, 2, 3)
         else:
             LW_FOOT, LW_EDGE, LW_BAND, LW_POOL = (6, 5, 3, 4)
 
-        # ------------------- 生成四张基础图 -------------------
-        with rasterio.open(dem_path_user) as _src_chk_u:
-            z_chk_u = _src_chk_u.read(1).astype(float)
-            if _src_chk_u.nodata is not None:
-                z_chk_u[z_chk_u == _src_chk_u.nodata] = np.nan
-
-        with rasterio.open(dem_path_500) as _src_chk_5:
-            z_chk_5 = _src_chk_5.read(1).astype(float)
-            if _src_chk_5.nodata is not None:
-                z_chk_5[z_chk_5 == _src_chk_5.nodata] = np.nan
-                # === 统一颜色范围：与 Figure 1 完全一致 ===
-
+        # ========== 颜色范围仅基于 DEM 计算 ==========
+        with rasterio.open(dem_path_user) as su:
+            zu = su.read(1).astype(float)
+            if su.nodata is not None:
+                zu[zu == su.nodata] = np.nan
+        with rasterio.open(dem_path_500) as s5:
+            z5 = s5.read(1).astype(float)
+            if s5.nodata is not None:
+                z5[z5 == s5.nodata] = np.nan
         q_low, q_high = (config or {}).get("fig5_6_quantiles", (2, 98))
-        COLOR_SEQ = (config or {}).get("fig5_6_elevation_colorscale", "RdBu_r")
+        CMIN, CMAX = _robust_minmax([zu, z5], (q_low, q_high))
 
-        CMIN, CMAX = _robust_minmax([z_chk_u, z_chk_5], (q_low, q_high))
-        CMID = None
-        COLOR_SCALE = COLOR_SEQ
-
-        percentiles = (config.get("fig1_percentile_span", (2, 98)) if config else (2, 98))
-        min_span   = (config.get("fig1_min_span", 0.15) if config else 0.15)
-        center     = float(house_ground_med)
-
-        delta_u = z_chk_u - center
-        delta_5 = z_chk_5 - center
-        # 合并两个 DEM 的有效像元
-        deltas = np.concatenate([
-            delta_u[np.isfinite(delta_u)],
-            delta_5[np.isfinite(delta_5)]
-        ]) if (np.isfinite(delta_u).any() or np.isfinite(delta_5).any()) else np.array([0.0])
-
-        p_low, p_high = np.nanpercentile(deltas, percentiles)
-        span = max(abs(p_low), abs(p_high), float(min_span))
-
-
-        xs, ys, z, _, _ = _read_dem_as_grid(dem_path_user, max_size=MAX_SIZE_USER)
-        zf = z[np.isfinite(z)]
-        if zf.size == 0:
-            zmin, zmax, zmid = 0.0, 1.0, 0.5
-        else:
-            zmin, zmax = float(np.nanmin(zf)), float(np.nanmax(zf))
-            zmid = _align_center_units(house_ground_med, z_chk_u)
-        
-        surf = go.Surface(
-            x=xs, y=ys, z=z,
-            surfacecolor=z,
-            colorscale=COLOR_SEQ,
-            cmin=CMIN, cmax=CMAX,
-            showscale=True,
-            colorbar=dict(title="Elevation (m)")
-        )
-        fig_elev3d_user = go.Figure(surf)
-        fig_elev3d_user.update_layout(
-            title=f"Elevation DSM - {aoi_radius_user:g}m", scene_aspectmode="data",
-            margin=dict(l=0, r=0, t=40, b=0),
-            showlegend=False
-        )
-
-        # USER Satellite
-        try:
-            xs, ys, z, _, _ = _read_dem_as_grid(dem_path_user, max_size=MAX_SIZE_USER)
-            xv, yv, zv, I, J, K, nr, nc = _grid_to_mesh(xs, ys, z)
-            naip_like = _fetch_naip_bbox_like_dem(dem_path_user, size_str=NAIP_SIZE_USER)
-            rgb_grid = _resample_rgb_to_grid(naip_like, nr, nc)
-            vertexcolor = _vertexcolor_from_rgb_grid(rgb_grid)
-            mesh = go.Mesh3d(
-                x=xv, y=yv, z=zv,
-                i=I, j=J, k=K,
-                vertexcolor=vertexcolor,
-                showscale=False,
-                lighting=dict(ambient=0.75, diffuse=0.9, specular=0.05, roughness=0.95),
-            )
-            fig_sat3d_user = go.Figure(mesh)
-            fig_sat3d_user.update_layout(
-                title=f"Satellite DSM - {aoi_radius_user:g}m", scene_aspectmode="data",
-                margin=dict(l=0, r=0, t=40, b=0),
-                showlegend=False
-            )
-        except Exception as e:
-            if verbose:
-                print(f"⚠ NAIP (user) 失败，改为 Elevation 备用: {e}")
-            xs, ys, z, _, _ = _read_dem_as_grid(dem_path_user, max_size=MAX_SIZE_USER)
+        # ========== 上排：Elevation DEM（彩色高程面） ==========
+        def _render_dem_surface(dem_tif, title, max_size, center_array):
+            xs, ys, z, _, _ = _read_dem_as_grid(dem_tif, max_size=max_size)
             zf = z[np.isfinite(z)]
             if zf.size == 0:
                 zmin, zmax, zmid = 0.0, 1.0, 0.5
             else:
                 zmin, zmax = float(np.nanmin(zf)), float(np.nanmax(zf))
-                zmid = _align_center_units(house_ground_med, z_chk_u)
-            
+                zmid = _align_center_units(house_ground_med, center_array)
             surf = go.Surface(
                 x=xs, y=ys, z=z,
                 surfacecolor=z,
                 colorscale=COLOR_SEQ,
                 cmin=CMIN, cmax=CMAX,
-                showscale=False
+                showscale=True, colorbar=dict(title="Elevation (m)")
             )
-            fig_sat3d_user = go.Figure(surf)
-            fig_sat3d_user.update_layout(
-                title=f"Elevation DSM (fallback) - {aoi_radius_user:g}m", scene_aspectmode="data",
-                margin=dict(l=0, r=0, t=40, b=0),
-                showlegend=False
-            )
+            fig = go.Figure(surf)
+            fig.update_layout(title=title, scene_aspectmode="data",
+                              margin=dict(l=0, r=0, t=40, b=0), showlegend=False)
+            return fig
 
-        # REF Elevation
-        with rasterio.open(dem_path_500) as _src_chk_5:
-            z_chk_5 = _src_chk_5.read(1).astype(float)
-            if _src_chk_5.nodata is not None:
-                z_chk_5[z_chk_5 == _src_chk_5.nodata] = np.nan
-        
-        xs, ys, z, _, _ = _read_dem_as_grid(dem_path_500, max_size=MAX_SIZE_REF)
-        zf = z[np.isfinite(z)]
-        if zf.size == 0:
-            zmin, zmax, zmid = 0.0, 1.0, 0.5
-        else:
-            zmin, zmax = float(np.nanmin(zf)), float(np.nanmax(zf))
-            zmid = _align_center_units(house_ground_med, z_chk_5)
-        
-        surf = go.Surface(
-            x=xs, y=ys, z=z,
-            surfacecolor=z,
-            colorscale=COLOR_SEQ,
-            cmin=CMIN, cmax=CMAX,
-            showscale=True,
-            colorbar=dict(title="Elevation (m)")
+        fig_dem_user = _render_dem_surface(
+            dem_path_user, f"Elevation DEM - {aoi_radius_user:g}m", MAX_SIZE_USER, zu
         )
-        fig_elev3d_500 = go.Figure(surf)
-        fig_elev3d_500.update_layout(
-            title="Elevation DSM - 500m", scene_aspectmode="data",
-            margin=dict(l=0, r=0, t=40, b=0),
-            showlegend=False
+        fig_dem_500 = _render_dem_surface(
+            dem_path_500, "Elevation DEM - 500m", MAX_SIZE_REF, z5
         )
 
-        # REF Satellite
-        try:
-            xs, ys, z, _, _ = _read_dem_as_grid(dem_path_500, max_size=MAX_SIZE_REF)
+        # ========== 下排：Satellite DSM（NAIP 贴图到 DSM 网格；无 DSM 时用 DEM 占位） ==========
+        def _render_satellite_mesh(geo_tif, title, max_size, naip_size):
+            xs, ys, z, _, _ = _read_dem_as_grid(geo_tif, max_size=max_size)
             xv, yv, zv, I, J, K, nr, nc = _grid_to_mesh(xs, ys, z)
-            naip_like = _fetch_naip_bbox_like_dem(dem_path_500, size_str=NAIP_SIZE_REF)
+            naip_like = _fetch_naip_bbox_like_dem(geo_tif, size_str=naip_size)
             rgb_grid = _resample_rgb_to_grid(naip_like, nr, nc)
-            vertexcolor = _vertexcolor_from_rgb_grid(rgb_grid)
             mesh = go.Mesh3d(
                 x=xv, y=yv, z=zv,
                 i=I, j=J, k=K,
-                vertexcolor=vertexcolor,
+                vertexcolor=_vertexcolor_from_rgb_grid(rgb_grid),
                 showscale=False,
                 lighting=dict(ambient=0.75, diffuse=0.9, specular=0.05, roughness=0.95),
             )
-            fig_sat3d_500 = go.Figure(mesh)
-            fig_sat3d_500.update_layout(
-                title="Satellite DSM - 500m", scene_aspectmode="data",
-                margin=dict(l=0, r=0, t=40, b=0),
-                showlegend=False
+            fig = go.Figure(mesh)
+            fig.update_layout(title=title, scene_aspectmode="data",
+                              margin=dict(l=0, r=0, t=40, b=0), showlegend=False)
+            return fig
+
+        tif_user_sat = dsm_path_user or dem_path_user
+        tif_ref_sat  = dsm_path_500 or dem_path_500
+
+        # user satellite
+        try:
+            fig_sat_user = _render_satellite_mesh(
+                tif_user_sat, f"Satellite DSM - {aoi_radius_user:g}m", MAX_SIZE_USER, NAIP_SIZE_USER
             )
         except Exception as e:
             if verbose:
-                print(f"⚠ NAIP (500m) 失败，改为 Elevation 备用: {e}")
-            xs, ys, z, _, _ = _read_dem_as_grid(dem_path_500, max_size=MAX_SIZE_REF)
-            zf = z[np.isfinite(z)]
-            if zf.size == 0:
-                zmin, zmax, zmid = 0.0, 1.0, 0.5
-            else:
-                zmin, zmax = float(np.nanmin(zf)), float(np.nanmax(zf))
-                zmid = _align_center_units(house_ground_med, z_chk_5)
-            
-            surf = go.Surface(
-                x=xs, y=ys, z=z,
-                surfacecolor=z,
-                colorscale=COLOR_SEQ,
-                cmin=CMIN, cmax=CMAX,
-                showscale=False
-            )
-            fig_sat3d_500 = go.Figure(surf)
-            fig_sat3d_500.update_layout(
-                title="Elevation DSM (fallback) - 500m", scene_aspectmode="data",
-                margin=dict(l=0, r=0, t=40, b=0),
-                showlegend=False
+                print(f"⚠ NAIP(user) 失败 -> Elevation DEM 备用: {e}")
+            fig_sat_user = _render_dem_surface(
+                dem_path_user, f"Elevation DEM (fallback) - {aoi_radius_user:g}m", MAX_SIZE_USER, zu
             )
 
-        # ------------------- 组合2x2图 + 叠加ring -------------------
+        # ref satellite
+        try:
+            fig_sat_500 = _render_satellite_mesh(
+                tif_ref_sat, "Satellite DSM - 500m", MAX_SIZE_REF, NAIP_SIZE_REF
+            )
+        except Exception as e:
+            if verbose:
+                print(f"⚠ NAIP(500m) 失败 -> Elevation DEM 备用: {e}")
+            fig_sat_500 = _render_dem_surface(
+                dem_path_500, "Elevation DEM (fallback) - 500m", MAX_SIZE_REF, z5
+            )
+
+        # ========== 组合 2x2 ==========
         combo = make_subplots(
             rows=2, cols=2,
             specs=[[{"type": "scene"}, {"type": "scene"}],
                    [{"type": "scene"}, {"type": "scene"}]],
             vertical_spacing=0.05, horizontal_spacing=0.05,
             subplot_titles=(
-                f"Elevation DSM - {aoi_radius_user:g}m",
-                "Elevation DSM - 500m",
+                f"Elevation DEM - {aoi_radius_user:g}m",
+                "Elevation DEM - 500m",
                 f"Satellite DSM - {aoi_radius_user:g}m",
-                "Satellite DSM - 500m"
-            )
+                "Satellite DSM - 500m",
+            ),
         )
+        for tr in fig_dem_user.data: combo.add_trace(tr, row=1, col=1)
+        for tr in fig_dem_500.data:  combo.add_trace(tr, row=1, col=2)
+        for tr in fig_sat_user.data: combo.add_trace(tr, row=2, col=1)
+        for tr in fig_sat_500.data:  combo.add_trace(tr, row=2, col=2)
 
-        # 添加基础traces
-        if fig_elev3d_user.data:
-            for tr in fig_elev3d_user.data: combo.add_trace(tr, row=1, col=1)
-        if fig_elev3d_500.data:
-            for tr in fig_elev3d_500.data: combo.add_trace(tr, row=1, col=2)
-        if fig_sat3d_user.data:
-            for tr in fig_sat3d_user.data: combo.add_trace(tr, row=2, col=1)
-        if fig_sat3d_500.data:
-            for tr in fig_sat3d_500.data: combo.add_trace(tr, row=2, col=2)
-
-        def _overlay_to_subplot(fig_obj, poly, dem_tif, color, lw, poly_crs, row, col, z_fallback):
-            """向子图添加多边形轮廓"""
+        # ========== 叠加多边形：上排在 DEM 上采样，下排在 DSM（或占位）上采样 ==========
+        def _overlay(fig_obj, poly, base_tif, color, lw, row, col, zfb):
             tmp = go.Figure()
             add_polygon_outline(
-                tmp, poly, dem_tif, color=color, lw=lw,
-                poly_crs=poly_crs, densify_px=DENSIFY_PX,
+                tmp, poly, base_tif, color=color, lw=lw,
+                poly_crs=src_crs_user, densify_px=DENSIFY_PX,
                 z_offset=1.2 if SPEED_MODE else 1.5,
-                fallback_z=z_fallback,
-                simplify_k=SIMPLIFY_K,
-                speed_mode=SPEED_MODE
+                fallback_z=zfb, simplify_k=SIMPLIFY_K, speed_mode=SPEED_MODE
             )
             for tr in tmp.data:
                 tr.showlegend = False
                 fig_obj.add_trace(tr, row=row, col=col)
 
-        # 叠加所有多边形到四个子图
-        if verbose:
-            print(f"  开始叠加多边形到4个子图...")
-        for (r, c, dem_tif, zfb) in [
-            (1, 1, dem_path_user, house_ground_med),
-            (2, 1, dem_path_user, house_ground_med),
-            (1, 2, dem_path_500, house_ground_med),
-            (2, 2, dem_path_500, house_ground_med),
-        ]:
-            _overlay_to_subplot(combo, house_area_raster, dem_tif, COL_FOOT, LW_FOOT, src_crs_user, r, c, zfb)
-            _overlay_to_subplot(combo, pad_ring_raster,   dem_tif, COL_EDGE, LW_EDGE, src_crs_user, r, c, zfb)
-
+        # 上排：用 DEM 作为采样底图
+        for (r, c, tif) in [(1,1, dem_path_user), (1,2, dem_path_500)]:
+            _overlay(combo, house_area_raster, tif, COL_FOOT, LW_FOOT, r, c, house_ground_med)
+            _overlay(combo, pad_ring_raster,   tif, COL_EDGE, LW_EDGE, r, c, house_ground_med)
             rings_drawn = 0
             for rp, colr in zip(bands_raster, COL_BANDS):
-                if rp is None: 
-                    continue
-                _overlay_to_subplot(combo, rp, dem_tif, colr, LW_BAND, src_crs_user, r, c, zfb)
+                if rp is None: continue
+                _overlay(combo, rp, tif, colr, LW_BAND, r, c, house_ground_med)
                 rings_drawn += 1
-                if rings_drawn >= MAX_RINGS_TO_DRAW:
-                    break
-            _overlay_to_subplot(combo, pooled_raster,     dem_tif, COL_POOL, LW_POOL, src_crs_user, r, c, zfb)
+                if rings_drawn >= MAX_RINGS_TO_DRAW: break
+            _overlay(combo, pooled_raster, tif, COL_POOL, LW_POOL, r, c, house_ground_med)
 
-        # —— 仅保留一个色标，避免多个 scene 的色标重叠 ——
-        # 先统一关闭，并再次确保统一的颜色范围
+        # 下排：用 DSM（若缺则用 DEM 占位）作为采样底图
+        for (r, c, tif) in [(2,1, tif_user_sat), (2,2, tif_ref_sat)]:
+            _overlay(combo, house_area_raster, tif, COL_FOOT, LW_FOOT, r, c, house_ground_med)
+            _overlay(combo, pad_ring_raster,   tif, COL_EDGE, LW_EDGE, r, c, house_ground_med)
+            rings_drawn = 0
+            for rp, colr in zip(bands_raster, COL_BANDS):
+                if rp is None: continue
+                _overlay(combo, rp, tif, colr, LW_BAND, r, c, house_ground_med)
+                rings_drawn += 1
+                if rings_drawn >= MAX_RINGS_TO_DRAW: break
+            _overlay(combo, pooled_raster, tif, COL_POOL, LW_POOL, r, c, house_ground_med)
+
+        # 统一色条：只保留右上（DEM-500m）
+        # 关闭全部 showscale，再打开右上一个
+        seen_surfaces = []
         for tr in combo.data:
             if hasattr(tr, "showscale"):
                 tr.showscale = False
             if getattr(tr, "type", None) == "surface":
-                tr.update(colorscale=COLOR_SCALE, cmin=CMIN, cmax=CMAX)
+                tr.update(colorscale=COLOR_SEQ, cmin=CMIN, cmax=CMAX)
+                seen_surfaces.append(tr)
+        if seen_surfaces:
+            # 第二个 surface 对应右上
+            tr = seen_surfaces[1] if len(seen_surfaces) > 1 else seen_surfaces[0]
+            tr.showscale = True
+            tr.colorbar = dict(title="Elevation (m)", x=1.02, xpad=12, len=0.86, thickness=16)
 
-        # 只在右上(scene2)的 Elevation surface 打开色标（你也可改成 scene1/3/4）
-        for tr in combo.data:
-            if getattr(tr, "type", None) == "surface" and getattr(tr, "scene", "scene2") == "scene2":
-                tr.showscale = True
-                tr.colorbar = dict(
-                    title="Elevation (m)",
-                    x=1.02,   # 画布右侧
-                    xpad=12,
-                    len=0.86,
-                    thickness=16
-                )
-                break
-        # 优化combo布局
         combo.update_layout(
-            title=dict(
-                text=f"3D Terrain Visualization: {aoi_radius_user}m vs 500m",
-                x=0.5, xanchor='center', font=dict(size=16)
-            ),
-            scene =dict(aspectmode="data", xaxis_title="X (m)", yaxis_title="Y (m)", zaxis_title="Elevation (m)"),
-            scene2=dict(aspectmode="data", xaxis_title="X (m)", yaxis_title="Y (m)", zaxis_title="Elevation (m)"),
-            scene3=dict(aspectmode="data", xaxis_title="X (m)", yaxis_title="Y (m)", zaxis_title="Elevation (m)"),
-            scene4=dict(aspectmode="data", xaxis_title="X (m)", yaxis_title="Y (m)", zaxis_title="Elevation (m)"),
+            title=dict(text=f"3D Terrain Visualization · DEM & DSM",
+                       x=0.5, xanchor='center', font=dict(size=16)),
+            scene =dict(aspectmode="data"),
+            scene2=dict(aspectmode="data"),
+            scene3=dict(aspectmode="data"),
+            scene4=dict(aspectmode="data"),
             margin=dict(l=0, r=70, t=80, b=0),
             showlegend=False,
             height=900 if SPEED_MODE else 1000
         )
-        
-        # 保存combo图
+
+        # 写文件
         if outdir is not None:
             combo_path = os.path.join(outdir, "figure5_6_3d_combo.html")
             combo.write_html(combo_path)
             if verbose:
-                print(f"  ✓ Saved figure5_6_3d_combo.html")
+                print("  ✓ Saved figure5_6_3d_combo.html")
 
         if verbose:
-            print("✔ 3D visualization complete (fast mode)")
+            print("✔ 3D visualization complete (Top=DEM, Bottom=Satellite/DSM)")
 
-        return fig_elev3d_user, fig_sat3d_user, fig_elev3d_500, fig_sat3d_500
+        return fig_dem_user, fig_sat_user, fig_dem_500, fig_sat_500
 
     except ImportError as e:
         print(f"⚠ Plotly not available for 3D visualization: {e}")
         return None, None, None, None
     except Exception as e:
         print(f"⚠ 3D visualization failed: {e}")
-        import traceback
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
         return None, None, None, None
 
 __all__ = [
