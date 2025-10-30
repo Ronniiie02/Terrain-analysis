@@ -2,9 +2,8 @@
 """
 COMPLETE TERRAIN ANALYSIS PIPELINE (Single-File Entry Point)
 =============================================================
-Full end-to-end execution with ZERO hardcodes.
+Full end-to-end execution
 All parameters exposed in config dict.
-Matches original logic 1:1 but fully parametrized.
 """
 
 from __future__ import annotations
@@ -969,35 +968,49 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
             print(f"✗ figure4_terrain_and_hist: {e}")
     
     # Figure 5 & 6: 3D - 使用DSM进行3D可视化
+    # Figure 5 & 6: 3D - Top = DEM (DTM), Bottom = Satellite/DSM
     if config.save_3d:
         try:
-            # 确定用户DSM路径
+            # 1) 取用户半径 与 500m 参考的 DTM/DSM 两套路径
             if config.dem_for_user_aoi and config.aoi_radius_m != config.reference_radius_m:
-                user_dsm_path = dem_results[f"dem_{int(config.aoi_radius_m)}m"]["dsm_path"]
+                user_key = f"dem_{int(config.aoi_radius_m)}m"
             else:
-                user_dsm_path = dem_results["dem_500m"]["dsm_path"]
+                user_key = "dem_500m"
 
-            # 500m参考DSM路径
-            ref_dsm_path = dem_results["dem_500m"]["dsm_path"]
+            user_dtm_path = dem_results[user_key]["dtm_path"]   # ← DEM/DTM（上排要用这个）
+            user_dsm_path = dem_results[user_key]["dsm_path"]   # ← DSM（下排 NAIP 贴这个；没有也可传 None）
 
+            ref_dtm_path  = dem_results["dem_500m"]["dtm_path"] # ← DEM/DTM（上排右图）
+            ref_dsm_path  = dem_results["dem_500m"]["dsm_path"] # ← DSM（下排右图）
+
+            # 防御性打印（跑一次就能肉眼确认传参是否正确）
+            if config.verbose:
+                print("[3D] DEM user:", os.path.basename(user_dtm_path))
+                print("[3D] DEM 500m:", os.path.basename(ref_dtm_path))
+                print("[3D] DSM user:", os.path.basename(user_dsm_path))
+                print("[3D] DSM 500m:", os.path.basename(ref_dsm_path))
+
+            # 如果 OSM 不可用，兜底 footprint/rings（保持你原逻辑）
             if osm_poly is None and config.verbose:
                 print("  ⚠ OSM未找到建筑，使用默认圆形 footprint 并保持环带差集")
                 house_area_raster = center_pt.buffer(config.house_buffer_m, resolution=64)
 
             pad_ring_raster = house_area_raster.buffer(config.pad_outer_m, resolution=96)\
-                              .difference(house_area_raster.buffer(config.pad_inner_m, resolution=96))
+                            .difference(house_area_raster.buffer(config.pad_inner_m, resolution=96))
 
             bands_raster = [house_area_raster.buffer(rmax, resolution=96)
-                              .difference(house_area_raster.buffer(rmin, resolution=96))
+                            .difference(house_area_raster.buffer(rmin, resolution=96))
                             for (rmin, rmax) in config.ring_bands_m]
 
             pooled_raster = house_area_raster.buffer(config.pooled_outer_max, resolution=96)\
                             .difference(house_area_raster.buffer(config.pooled_outer_min, resolution=96))
 
-            # 调用3D可视化函数，使用DSM
+            # 2) 关键：上排传 DTM 到 dem_path_*，下排传 DSM 到 dsm_path_*
             fig5_user, fig6_user, fig5_ref, fig6_ref = add_3d_figures_to_pipeline(
-                dem_path_user=user_dsm_path,
-                dem_path_500=ref_dsm_path,
+                dem_path_user=user_dtm_path,               # ✅ 上排用 DEM/DTM
+                dem_path_500=ref_dtm_path,                 # ✅ 上排用 DEM/DTM
+                dsm_path_user=user_dsm_path,               # ✅ 下排 Satellite/DSM（可为 None）
+                dsm_path_500=ref_dsm_path,                 # ✅ 下排 Satellite/DSM（可为 None）
                 aoi_radius_user=config.aoi_radius_m,
                 house_ground_med=house_ground,
                 house_area_raster=house_area_raster,
@@ -1010,17 +1023,17 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
                 verbose=config.verbose,
                 config=config.viz_config,
             )
-            # 新增：显示combo图（之前可能漏了）
+
             combo_path = os.path.join(config.outdir, "figure5_6_3d_combo.html")
             if os.path.exists(combo_path) and config.verbose:
                 print(f"  ✅ 3D组合图已生成：{combo_path}")
-                
             if config.verbose:
                 print("✓ figure5_6_3d_combo.html")
-                    
+
         except Exception as e:
             if config.verbose:
                 print(f"✗ 3D visualizations: {e}")
+
     
     # ===== STEP 9: Ring Metrics =====
     if config.verbose:
