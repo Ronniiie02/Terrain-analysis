@@ -1,6 +1,19 @@
-.venv/
+# macOS
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Frontend
+frontend-react/dist/
+frontend-react/node_modules/
+node_modules/
+
+# Python
 __pycache__/
 *.pyc
-*.log
-*.tif
 .env
+
+# Data/cache/outputs
+outputs/
+src/dem_cache/
