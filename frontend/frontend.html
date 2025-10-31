@@ -1042,7 +1042,6 @@ img[src]:not([src=""]):not([src="#"]):not([src="null"]) {
             <option value="100" selected>100m</option>
             <option value="200">200m</option>
             <option value="300">300m</option>
-            <option value="500">500m</option>
           </select>
         </div>
         <div class="field small">
@@ -1258,13 +1257,57 @@ function createStarIcon(size=28){
 /* ---------- 地图 ---------- */
 function initMap() {
   const el = $("#satMap");
-  satMap = L.map(el).setView([0,0], 2);
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    attribution: "© OpenStreetMap", maxZoom: 19
-  }).addTo(satMap);
+  // 初始中心：如果还没有坐标，就先看世界
+  satMap = L.map(el, { zoomControl: true }).setView([0, 0], 2);
 
+  // ---- 底图（Street + Satellite）----
+  // OSM（街道）
+  const osm = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: '© OpenStreetMap'
+  });
+
+  // Esri 卫星
+  const esriWorldImagery = L.tileLayer(
+    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    {
+      maxZoom: 20,
+      attribution: "Tiles © Esri — Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community"
+    }
+  );
+
+  // （可选）Esri 地名/边界标签叠加（半透明）
+  const esriPlaces = L.tileLayer(
+    "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+    {
+      maxZoom: 20,
+      opacity: 0.8,
+      attribution: "Esri Boundaries & Places"
+    }
+  );
+
+  // 默认显示：卫星 + 标签
+  esriWorldImagery.addTo(satMap);
+  esriPlaces.addTo(satMap);
+
+  // 图层控制器（左上角/右上角都行）
+  L.control
+    .layers(
+      {
+        "🛰 Satellite (Esri)": esriWorldImagery,
+        "🗺 Street (OSM)": osm
+      },
+      {
+        "🏷 Labels (Esri)": esriPlaces
+      },
+      { collapsed: false }
+    )
+    .addTo(satMap);
+
+  // 用于放置星标+圈的图层组（你已有逻辑会往这里加）
   overlayGroup = L.layerGroup().addTo(satMap);
 }
+
 
 function placeTarget(lat, lon, radiusM = null) {
   if (!satMap) initMap();
@@ -1569,13 +1612,15 @@ function parseAreaCSVToStats(csv){
 async function reverseGeocode(lat, lon){
   if (GOOGLE_KEY) {
     try{
-      const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lon}&key=${GOOGLE_KEY}`);
+      const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lon}&key=${GOOGLE_KEY}&language=en`);
       const j = await r.json();
       if (j.status === "OK" && j.results && j.results[0]) return j.results[0].formatted_address;
     }catch(e){}
   }
   try{
-    const r2 = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`);
+    const r2 = await fetch(
+      `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&accept-language=en&namedetails=0`
+    );
     const j2 = await r2.json();
     if (j2 && j2.display_name) return j2.display_name;
   }catch(e){}
@@ -1613,6 +1658,26 @@ function extractFirstSentence(txt){
   }
   return (cut === -1) ? s : s.slice(0, cut);
 }
+function cleanAddress(raw){
+  if (!raw) return raw;
+  let s = String(raw);
+
+  // 先把 “A/B/C” 这种多语言并列只取第一个（最左侧）
+  s = s.split(" / ")[0].split("/")[0];
+
+  // 去掉 CJK（中日韩）字符（如果你想保留重音字母，就别用 ASCII 过滤）
+  s = s.replace(/[\u3400-\u9FFF\uF900-\uFAFF\u3040-\u30FF\uAC00-\uD7AF]+/g, "");
+
+  // 把多余的斜杠、重复逗号与多空格规整
+  s = s.replace(/[\/]+/g, " ");
+  s = s.replace(/\s*,\s*/g, ", ");
+  s = s.replace(/,{2,}/g, ", ");
+  s = s.replace(/\s{2,}/g, " ").trim();
+
+  // 如果清完只剩空，退回原文（兜底）
+  return s || String(raw).trim();
+}
+
 
 /* ---------- 加载结果（含 Delta 文本全显） ---------- */
 async function loadOutputs(runId){
@@ -1630,7 +1695,10 @@ async function loadOutputs(runId){
         ? `${Number(manifest.lat).toFixed(6)}, ${Number(manifest.lon).toFixed(6)}`
         : "--"
     );
-    $("#mLocation").textContent = address;
+    const displayAddr = cleanAddress(address);
+    $("#mLocation").textContent = displayAddr;
+    // 同步回填到输入框（避免下一次 POST 又把多语言送回后端）
+    $("#addr").value = displayAddr;
     // loadOutputs 里替换这一段
     // ground elevation
     if (Number.isFinite(Number(manifest.house_ground_m))) {
@@ -1730,7 +1798,7 @@ $("#lat").addEventListener("blur", async ()=>{
   if (Number.isFinite(lat) && Number.isFinite(lon)) {
     const addr = await reverseGeocode(lat, lon);
     if (addr) { 
-      $("#addr").value = addr; 
+      $("#addr").value = cleanAddress(addr);
       showNotification("Auto-filled address from coordinates.", "success");
     }
   }
@@ -1740,7 +1808,7 @@ $("#lon").addEventListener("blur", async ()=>{
   if (Number.isFinite(lat) && Number.isFinite(lon)) {
     const addr = await reverseGeocode(lat, lon);
     if (addr) { 
-      $("#addr").value = addr; 
+      $("#addr").value = cleanAddress(addr); 
       showNotification("Auto-filled address from coordinates.", "success");
     }
   }
