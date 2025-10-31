@@ -17,3 +17,9 @@ __pycache__/
 # Data/cache/outputs
 outputs/
 src/dem_cache/
+.DS_Store
+.ipynb_checkpoints/
+outputs/
+src/dem_cache/
+frontend-react/node_modules/
+frontend-react/dist/
