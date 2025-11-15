@@ -417,7 +417,7 @@ Uchicago-elevation/
 
 ---
 
-## 🛠️ Technologies Used
+## Technologies Used
 
 ### Backend
 - **Python 3.10+** - Core programming language
@@ -473,7 +473,7 @@ Uchicago-elevation/
 
 ---
 
-## 📚 Academic Context
+## Academic Context
 
 This repository implements methods from:
 
@@ -489,7 +489,7 @@ This repository implements methods from:
 4. **Operational pipeline:** Production-ready implementation with web UI
 
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 We gratefully acknowledge:
 
@@ -504,8 +504,6 @@ We gratefully acknowledge:
 - All beta testers and early users who provided feedback
 
 <div align="center">
-
-**Built with ❤️ at the University of Chicago**
 
 *Advancing flood risk assessment through high-resolution terrain analysis*
 
