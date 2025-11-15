@@ -55,17 +55,17 @@ This project is a collaboration between:
 
 ## ✨ Key Features
 
-### 🗺️ **Automated DEM Generation**
+### **Automated DEM Generation**
 - 1m bare-earth DTM from LiDAR point clouds (USGS 3DEP)
 - PDAL-based pipeline for noise filtering and ground classification
 - Automatic dataset discovery and download
 
-### 🏠 **Building-Aware Property Localization**
+### **Building-Aware Property Localization**
 - Dual-source geocoding (Google Maps / Nominatim)
 - OpenStreetMap building footprint integration
 - Smart relocation to actual building locations
 
-### 📊 **Advanced Terrain Analytics**
+### **Advanced Terrain Analytics**
 - **Adaptive house-ground estimation** using concentric rings (3-30m)
 - **IQR-based outlier removal** with skew-aware quantiles
 - **Multi-scale ring analysis** (10-500m radius)
@@ -73,21 +73,21 @@ This project is a collaboration between:
   - Slope statistics and terrain classification
   - Flow convergence and dominant drainage directions
 
-### 📈 **Composite Risk Scoring**
+### **Composite Risk Scoring**
 - Global elevation ranking (500m context)
 - Local depression analysis
 - Flatness assessment (drainage speed)
 - Flow convergence quantification
 - Transparent weighting with gamma non-linearity
 
-### 🎨 **Rich Visualization Suite**
+### **Rich Visualization Suite**
 - 2D elevation, slope, and aspect maps
 - Histogram-based elevation distributions
 - Interactive 3D terrain views (dual AOI comparison)
 - Multi-scale metrics tables
 - Natural language narrative reports
 
-### 🚀 **Modern Web Architecture**
+### **Modern Web Architecture**
 - **FastAPI** backend with async support
 - **RESTful API** for pipeline orchestration
 - **Responsive UI** with Tailwind CSS
@@ -130,7 +130,7 @@ graph TB
 
 ---
 
-## 💻 Installation
+## Installation
 
 ### Prerequisites
 
@@ -223,8 +223,8 @@ from elevation.run_final_pipeline import PipelineConfig, run_pipeline
 
 # Configure the analysis
 config = PipelineConfig()
-config.lat = 41.8781  # Chicago coordinates
-config.lon = -87.6298
+config.lat = XXX  # Chicago coordinates
+config.lon = XXX
 config.aoi_radius_m = 500.0
 config.output_dir = "./outputs/my_analysis"
 config.generate_narrative = True
@@ -242,7 +242,7 @@ print(f"Outputs saved to: {results['outputs_dir']}")
 
 ---
 
-## 📡 API Documentation
+## API Documentation
 
 ### Core Endpoints
 
@@ -252,7 +252,7 @@ Trigger a new terrain analysis run.
 **Request Body:**
 ```json
 {
-  "address": "123 Main St, Chicago, IL",
+  "address": "XXX",
   "lat": null,
   "lon": null,
   "aoi_radius_m": 500,
@@ -263,7 +263,7 @@ Trigger a new terrain analysis run.
 **Response:**
 ```json
 {
-  "run_id": "chicago_20250115_143022",
+  "run_id": "XXX",
   "status": "processing",
   "message": "Pipeline started successfully"
 }
@@ -275,7 +275,7 @@ Retrieve results for a specific run.
 **Response:**
 ```json
 {
-  "run_id": "chicago_20250115_143022",
+  "run_id": "XXX",
   "status": "completed",
   "house_ground_m": 182.4,
   "percentile_rank": 13.7,
@@ -290,20 +290,20 @@ Get the complete manifest with all output paths.
 
 ---
 
-## 🔄 Core Pipeline Workflow
+## Core Pipeline Workflow
 
-### 1. **Location Resolution** 📍
+### 1. **Location Resolution** 
 - Address geocoding via Google Maps or Nominatim
 - Coordinate validation and projection handling
 - Fallback strategies for ambiguous locations
 
-### 2. **Building Detection** 🏢
+### 2. **Building Detection** 
 - OSM Overpass API query for building footprints
 - Spatial intersection and proximity analysis
 - Smart relocation to building centroid
 - Fallback circular building generation
 
-### 3. **DEM Generation** 🗺️
+### 3. **DEM Generation** 
 - USGS 3DEP dataset discovery
 - LiDAR point cloud download and processing
 - PDAL pipeline execution:
@@ -329,13 +329,13 @@ Get the complete manifest with all output paths.
   }
   ```
 
-### 4. **Terrain Analysis** 📊
+### 4. **Terrain Analysis** 
 - **Slope calculation:** First derivative of elevation
 - **Aspect computation:** Direction of maximum slope
 - **Curvature analysis:** Second derivative metrics
 - **Flow accumulation:** D8 algorithm for drainage paths
 
-### 5. **Multi-Scale Metrics** 🎯
+### 5. **Multi-Scale Metrics** 
 For radii [10, 50, 100, 200, 300, 500] meters:
 - Δelevation (house vs. ring median)
 - Slope statistics (min, max, mean, std)
@@ -343,7 +343,7 @@ For radii [10, 50, 100, 200, 300, 500] meters:
 - Flow convergence index
 - Dominant drainage direction
 
-### 6. **Risk Score Calculation** ⚠️
+### 6. **Risk Score Calculation** 
 ```python
 # Composite risk formula
 risk = w1 * global_elevation_risk + 
@@ -356,10 +356,10 @@ if global_percentile < 0.3:
     risk = risk ** gamma
 ```
 
-### 7. **Output Generation** 📁
+### 7. **Output Generation** 
 - High-resolution PNG maps
 - Interactive 3D HTML visualizations
-- CSV/Parquet data tables
+- Data tables
 - Natural language narrative
 - JSON manifest file
 
@@ -516,55 +516,6 @@ This repository implements methods from:
 3. **Interpretable scoring:** Physics-based rather than black-box ML
 4. **Operational pipeline:** Production-ready implementation with web UI
 
----
-
-## 🤝 Contributing
-
-We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details.
-
-### Development Setup
-```bash
-# Install dev dependencies
-pip install -e ".[dev]"
-
-# Run tests
-pytest tests/
-
-# Format code
-black src/ api/ tests/
-isort src/ api/ tests/
-
-# Lint code
-flake8 src/ api/ tests/
-mypy src/ api/
-```
-
-### Contribution Areas
-- 🐛 Bug fixes and performance improvements
-- 📊 New terrain metrics and risk factors
-- 🗺️ Additional data source integrations
-- 🎨 UI/UX enhancements
-- 📝 Documentation improvements
-- 🧪 Test coverage expansion
-
----
-
-## 👥 Team
-
-### Project Team
-- **Yiyang Yao** - Lead Developer & GIS Specialist
-- **Jialong Guo** - Data Engineering & Pipeline Architecture  
-- **Qi Yang** - Machine Learning & Risk Modeling
-- **Chenxi Liu** - Frontend Development & Visualization
-
-### Academic Advisors
-- **Wendy Klusendorf** - Project Advisor
-- **Anil Chaturvedi, PhD** - Course Instructor
-
-### Industry Partner
-- **Tokio Marine Highland** - Domain Expertise & Use Case Definition
-
----
 
 ## 🙏 Acknowledgments
 
@@ -579,26 +530,6 @@ We gratefully acknowledge:
 - The open-source geospatial community (GDAL, PDAL, OSGeo)
 - FastAPI and Python scientific computing ecosystem
 - All beta testers and early users who provided feedback
-
----
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-**Note:** This is academic research software. For commercial deployment, especially in insurance applications, additional validation and compliance review are recommended.
-
----
-
-## 📧 Contact
-
-For questions, suggestions, or collaboration opportunities:
-
-- **GitHub Issues:** [Create an issue](https://github.com/Ronniiie02/Terrain-analysis/issues)
-- **Email:** [Contact via University](mailto:yaoyy@uchicago.edu)
-- **Project Repository:** [https://github.com/Ronniiie02/Terrain-analysis](https://github.com/Ronniiie02/Terrain-analysis)
-
----
 
 <div align="center">
 
