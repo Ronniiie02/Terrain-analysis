@@ -1,4 +1,3 @@
-
 # api/routers/runs.py
 from typing import Any, Dict, Optional
 from fastapi import APIRouter, HTTPException, Query
@@ -13,41 +12,38 @@ from api.services.utils_cache import (
 )
 from api.settings import OUTPUTS_DIR
 
-
-# 尝试可选地址解析（没有也不报错）
+# Try to import geocoding tools; if they fail (e.g., missing API key), disable gracefully
 try:
-    # 新增：引入 reverse_geocode，用于 lat/lon -> 地址
-    from elevation.geocode import resolve_location_from_user_input, reverse_geocode  # type: ignore
-except Exception:  # 模块不存在时退化
-    resolve_location_from_user_input = None  # type: ignore
-    reverse_geocode = None  # type: ignore
+    from elevation.geocode import resolve_location_from_user_input, reverse_geocode
+except Exception:  
+    resolve_location_from_user_input = None 
+    reverse_geocode = None 
 
 router = APIRouter()
 
-# ------------------ Pydantic 模型 ------------------
 class CreateRunRequest(BaseModel):
-    # 任选其一：address 或 lat/lon
-    address: Optional[str] = Field(None, description="地址（可选）")
-    lat: Optional[float] = Field(None, description="纬度（可选）")
-    lon: Optional[float] = Field(None, description="经度（可选）")
+    # User must provide either: an address OR latitude/longitude
+    address: Optional[str] = Field(None, description="Address (optional)")
+    lat: Optional[float] = Field(None, description="Latitude (optional)")
+    lon: Optional[float] = Field(None, description="Longitude (optional)")
 
-    # 其它参数（与你的前端一致）
-    aoi_radius_m: Optional[float] = Field(500.0, description="分析半径")
-    output_format: Optional[str] = Field("csv", description="csv/parquet/both")
-    table_format: Optional[str] = Field(None, description="兼容旧字段（csv/parquet/both）")
+    # Other parameters (match your frontend exactly)
+    aoi_radius_m: Optional[float] = Field(500.0, description="Analysis radius in meters")
+    output_format: Optional[str] = Field("csv", description="Output format: csv, parquet, or both")
+    table_format: Optional[str] = Field(None, description="Legacy field for backward compatibility (csv/parquet/both)")
     verbose: Optional[bool] = True
     generate_narrative: Optional[bool] = True
     save_3d: Optional[bool] = True
 
     @field_validator("output_format", "table_format")
     @classmethod
-    def _fmt_ok(cls, v: Optional[str]) -> Optional[str]:
+    def validate_format(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return v
-        v2 = v.lower()
-        if v2 not in {"csv", "parquet", "both"}:
-            raise ValueError("output_format 只能是 csv/parquet/both")
-        return v2
+        v_lower = v.lower()
+        if v_lower not in {"csv", "parquet", "both"}:
+            raise ValueError("output_format must be one of: csv, parquet, or both")
+        return v_lower
 
 
 class RunStatus(BaseModel):
@@ -57,14 +53,14 @@ class RunStatus(BaseModel):
     outputs_dir: Optional[str] = None
 
 
-# ------------------ 工具函数 ------------------
-# ------------------ 工具函数 ------------------
-def _pick_coords_or_address(req: CreateRunRequest) -> Dict[str, Any]:
+# ------------------ Helper Functions ------------------
+# ------------------ Helper Functions ------------------
+def parse_location_input(req: CreateRunRequest) -> Dict[str, Any]:
     """
-    统一解析用户输入：强制先地理编码，得到规范化 label。
-    所有地址字符串（无论输入简写/大小写）都统一标准化。
+    Standardize user input: always geocode first to get a consistent label.
+    All address strings (regardless of shorthand or case) are normalized.
     """
-    # 1️⃣ 经纬度优先
+    # 1. Prefer latitude/longitude if provided
     if req.lat is not None and req.lon is not None:
         lat_f = float(req.lat)
         lon_f = float(req.lon)
@@ -74,17 +70,18 @@ def _pick_coords_or_address(req: CreateRunRequest) -> Dict[str, Any]:
                 label = reverse_geocode(lat_f, lon_f)
             except Exception:
                 pass
+        # Fallback to coordinates as label if no address found
         label = label or f"{lat_f:.6f}, {lon_f:.6f}"
         return {"lat": lat_f, "lon": lon_f, "label": label}
 
-    # 2️⃣ 地址输入 → 强制地理编码
+    # 2. Address input → force geocoding
     if req.address and req.address.strip():
         raw_addr = req.address.strip()
 
-        # ✅ 强制小写转 Title Case，消除大小写差异
+        # Convert to Title Case to reduce case sensitivity issues
         raw_addr = raw_addr.lower().title()
 
-        # ✅ 调用统一解析器（Google 优先，OSM 兜底）
+        # Use unified geocoder (Google first, fallback to OSM)
         if resolve_location_from_user_input is not None:
             lat, lon, label = None, None, None
             try:
@@ -92,45 +89,50 @@ def _pick_coords_or_address(req: CreateRunRequest) -> Dict[str, Any]:
             except Exception:
                 pass
 
-            # ✅ 无论解析成功与否，都生成一个稳定 label
+            # Always generate a stable label even if geocoding partially fails
             if lat is not None and lon is not None:
                 canonical_label = (label or raw_addr).strip()
-                # 进一步标准化去空格、逗号
+                # Clean up commas and spacing
                 canonical_label = re.sub(r"\s*,\s*", ", ", canonical_label)
                 return {"lat": float(lat), "lon": float(lon), "label": canonical_label}
 
-        # ❌ 没解析成功 → fallback
+        # If geocoding failed → return original address as label
         return {"lat": None, "lon": None, "label": raw_addr}
 
-    raise HTTPException(status_code=400, detail="请提供地址或经纬度")
+    # No valid input
+    raise HTTPException(status_code=400, detail="Please provide either an address or latitude/longitude")
 
 
 
-
-# ------------------ 路由 ------------------
+# ------------------ API Routes ------------------
 @router.post("", response_model=RunStatus)
 def create_run_endpoint(body: CreateRunRequest):
-    coords = _pick_coords_or_address(body)
+    """
+    Create a new analysis run.
+    Returns immediately with run_id and status (could be 'cached' if result exists).
+    """
+    coords = parse_location_input(body)
     payload = body.model_dump()
 
-    # 兼容处理
+    # Backward compatibility: use table_format if output_format is missing
     if not payload.get("output_format") and payload.get("table_format"):
         payload["output_format"] = payload["table_format"]
 
-    # 注入解析结果
+    # Inject geocoded coordinates
     if coords["lat"] is not None and coords["lon"] is not None:
         payload.update({"lat": coords["lat"], "lon": coords["lon"]})
 
+    # Save normalized address and original input
     if coords.get("label"):
         payload["address"] = coords["label"]
         if body.address and body.address.strip():
             payload["input_address"] = body.address.strip()
         payload["location_text"] = coords["label"]
 
-    # 调用增强的幂等性检查
+    # Create the run (with enhanced idempotency/caching)
     run_id = pr.create_run(payload)
     
-    # 立即检查状态，如果是缓存命中则返回done
+    # Check status immediately — return 'done' if cached
     status_data = pr.get_run(run_id)
     
     return RunStatus(
@@ -142,10 +144,9 @@ def create_run_endpoint(body: CreateRunRequest):
 
 
 
-
-
 @router.get("/{run_id}")
 def get_run_status(run_id: str):
+    """Get current status of a run (queued, running, done, error, cached)."""
     data = pr.get_run(run_id)
     return JSONResponse(data)
 
@@ -153,18 +154,22 @@ def get_run_status(run_id: str):
 
 @router.get("/{run_id}/files")
 def list_run_files(run_id: str):
-    """列出该 run 的所有输出（相对路径）"""
+    """List all output files generated by this run (relative paths)."""
     return {"files": pr.list_files(run_id)}
 
 
 @router.get("/{run_id}/manifest")
 def get_run_manifest(run_id: str):
-    # 先走原逻辑（给 UUID 任务用）
+    """
+    Get metadata about outputs: files, figures, tables.
+    Supports both UUID-based runs and slug-based cached runs.
+    """
+    # First: try standard UUID-based manifest
     m = pr.read_manifest_public(run_id)
     if m:
         return JSONResponse(m)
 
-    # ✅ 兜底：把 run_id 当作 slug，到 outputs 下找
+    # Fallback: treat run_id as a slug (e.g., "123-main-st-500m") and search in outputs
     from api.services.utils_cache import find_existing_run
     from api.settings import OUTPUTS_DIR
     hit = find_existing_run(str(OUTPUTS_DIR), run_id)
@@ -177,7 +182,7 @@ def get_run_manifest(run_id: str):
         except Exception:
             pass
 
-    # 原有队列/运行中兼容
+    # Handle in-progress or queued jobs
     state = pr.get_run(run_id)
     if state.get("status") in {"queued", "running"}:
         return JSONResponse({
@@ -186,26 +191,38 @@ def get_run_manifest(run_id: str):
             "error": state.get("error"),
             "message": state.get("message"),
         })
-    raise HTTPException(status_code=404, detail="manifest not found")
+    
+    raise HTTPException(status_code=404, detail="Manifest not found")
 
 
 
-# api/routers/runs.py -> download_file
+# Download a specific file from a run
 @router.get("/{run_id}/download")
 def download_file(run_id: str, filename: str = Query(...)):
-    # 1) 先尝试把 run_id 当 UUID 走
+    """
+    Download a file from a run.
+    Supports:
+      - UUID-based runs
+      - Slug-based cached runs (e.g., address_radius)
+    """
+    # 1. Try UUID-based file lookup
     try:
         path = pr.get_file_path(run_id, filename)
-        return _file_response_auto(path, filename)
+        return send_file_with_correct_type(path, filename)
     except FileNotFoundError:
         pass
 
-    # 2) 把 run_id 当 slug（地址_半径）→ 映射到真实目录再找文件
-    smart = find_existing_run_smart(str(OUTPUTS_DIR), run_id, None, None, _parse_radius_from_runid(run_id) or None)
+    # 2. Try smart lookup using slug (address + radius)
+    smart = find_existing_run_smart(
+        str(OUTPUTS_DIR), run_id, None, None, 
+        _parse_radius_from_runid(run_id) or None
+    )
     if smart:
         outdir, _, _, _ = smart
         import os
         abs_path = os.path.join(outdir, filename)
+        
+        # If exact path doesn't exist, search recursively for matching filename
         if not os.path.exists(abs_path):
             base = os.path.basename(filename)
             found = None
@@ -214,40 +231,42 @@ def download_file(run_id: str, filename: str = Query(...)):
                     if f == base:
                         found = os.path.join(root, f)
                         break
-                if found: break
+                if found: 
+                    break
             if not found:
-                raise HTTPException(status_code=404, detail=f"file not found: {filename}")
+                raise HTTPException(status_code=404, detail=f"File not found: {filename}")
             abs_path = found
-        return _file_response_auto(abs_path, os.path.basename(abs_path))
+        
+        return send_file_with_correct_type(abs_path, os.path.basename(abs_path))
 
-    raise HTTPException(status_code=404, detail=f"file not found: {filename}")
+    raise HTTPException(status_code=404, detail=f"File not found: {filename}")
 
 
 
-# 小工具：自动识别 MIME，和你原来的返回一致
-from fastapi.responses import FileResponse
-def _file_response_auto(path: str, filename: str):
-    if path.endswith((".html",".htm")):
+# Helper: auto-detect file type and set correct MIME + download behavior
+def send_file_with_correct_type(path: str, filename: str):
+    """Return FileResponse with proper content type and inline/download behavior."""
+    if path.endswith((".html", ".htm")):
         return FileResponse(path, media_type="text/html",
-                            headers={"Content-Disposition":"inline"})
+                            headers={"Content-Disposition": "inline"})
     if path.endswith(".png"):
         return FileResponse(path, media_type="image/png", filename=filename)
-    if path.endswith((".jpg",".jpeg")):
+    if path.endswith((".jpg", ".jpeg")):
         return FileResponse(path, media_type="image/jpeg", filename=filename)
     if path.endswith(".csv"):
         return FileResponse(path, media_type="text/csv", filename=filename)
     if path.endswith(".parquet"):
         return FileResponse(path, media_type="application/octet-stream", filename=filename)
-    if path.endswith((".tif",".tiff")):
+    if path.endswith((".tif", ".tiff")):
         return FileResponse(path, media_type="image/tiff", filename=filename)
     return FileResponse(path, filename=filename)
 
 
 
 @router.get("/{run_id}/stderr", response_class=PlainTextResponse)
-def stderr(run_id: str):
-    """获取错误日志（仅当任务失败时）"""
+def get_error_log(run_id: str):
+    """Return error message/log only if the run failed."""
     data = pr.get_run(run_id)
     if data.get("status") != "error":
         return ""
-    return data.get("message", "未知错误")
+    return data.get("message", "Unknown error")

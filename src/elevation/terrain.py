@@ -5,9 +5,6 @@ Terrain analytics core - IMPROVED VERSION (parametrized)
 - Adaptive terrain classification
 - Slope/Aspect/Curvature derivation
 - Unified ring metrics & narrative
-
-This module mirrors the final single-file pipeline logic 1:1 for these parts.
-All hardcoded values are now PARAMETRIZED for flexibility.
 """
 
 from __future__ import annotations
@@ -19,13 +16,10 @@ import rasterio.errors
 import pyproj
 import scipy.ndimage as ndi
 from shapely.geometry import Point, Polygon, MultiPolygon
-from shapely.ops import unary_union
 from scipy.ndimage import convolve
-
+import pandas as pd
 # project helpers
-from .helpers import (
-    _reproj_poly, _geom_ok, iqr_filter, iqr_clip_arr, nan_mean_filter
-)
+from .helpers import _reproj_poly
 
 __all__ = [
     "estimate_house_ground_adaptive",
@@ -35,59 +29,6 @@ __all__ = [
     "generate_narrative",
 ]
 
-# ============================================
-# DEFAULT CONFIGURATION - All parametrized
-# ============================================
-
-DEFAULT_HOUSE_GROUND_CONFIG = {
-    # 环带数据质量阈值（像素数）
-    "min_size_ring_8_15": 30,
-    "min_size_edge": 10,
-    "min_size_ring_3_8": 20,
-    "min_size_ring_15_30": 50,
-    
-    # 回退用的 3857 环带定义 [(r_inner, r_outer), ...]
-    "fallback_annuli": [(2.0, 25.0), (10.0, 35.0)],
-    "min_vals_annulus": 8,
-    
-    # 最近像素搜索范围
-    "fallback_search_radius_px": 25,
-    
-    # 最小样本大小
-    "min_sample_size": 8,
-    "fallback_sample_size": 1,  # 极端回退时
-    
-    # 裁剪阈值
-    "q_high_tail_threshold": 98.0,      # 用于检测高尾
-    "hard_q_high_tail": 60.0,            # 高尾裁剪百分位数
-    "soft_k_high_tail": 1.2,             # 高尾下的软裁剪系数
-    "soft_k_normal": 1.8,                # 正常情况下的软裁剪系数
-    "q_estimate_min": 0.30,              # 定量化下限
-    "q_estimate_max": 0.45,              # 定量化上限
-}
-
-DEFAULT_TERRAIN_CLASS_CONFIG = {
-    # 基础坡度阈值（度）
-    "base_flat": 1.7,
-    "base_gentle": 10.0,
-    "base_vsteep": 30.0,
-    
-    # 曲率计算
-    "k_curv": 2.0,
-    "use_multiscale": True,
-    "pix_scales": (3, 7, 15),
-    "min_patch_pixels": 9,
-    
-    # 地形分类的坡度阈值（度）
-    "slope_threshold_convex_concav": 15.0,
-    "slope_threshold_concav_steep": 5.0,
-}
-
-DEFAULT_RING_METRICS_CONFIG = {
-    # 坡度分类的阈值（度）
-    "slope_flat_threshold": 2.0,
-    "slope_gentle_threshold": 5.0,
-}
 
 # ---------------------------
 # House-ground robust estimator
@@ -182,7 +123,7 @@ def estimate_house_ground_adaptive(
     if ring_3_8.size   >= min_size_ring_3_8: pools.append(ring_3_8)
     if ring_15_30.size >= min_size_ring_15_30: pools.append(ring_15_30)
 
-    # 回退 1：3857 环带
+    # 3857 ring
     if not pools:
         for rin, rout in fallback_annuli:
             vals = _annulus_vals(cx, cy, rin, rout)
@@ -211,7 +152,7 @@ def estimate_house_ground_adaptive(
             return float(nv), {"status":"nearest_valid_pixel", "n_base":1, "n_used":1, "method":"single_pixel"}
         return np.nan, {"status":"insufficient", "n":0}
 
-    # IQR 预清洗
+    # IQR 
     v0 = base.copy()
     q1, q3 = np.percentile(v0, [25, 75]); iqr0 = max(q3 - q1, 1e-9)
     v0 = v0[(v0 >= q1 - 1.5 * iqr0) & (v0 <= q3 + 1.5 * iqr0)]
@@ -382,12 +323,19 @@ def derive_slope_aspect_curvature(
 # Unified ring metrics + narrative
 # ---------------------------
 
-def compute_flow_convergence(aspect_array, house_rc, ring_mask, rows_grid, cols_grid) -> float:
-    rows_sel = rows_grid[ring_mask]
-    cols_sel = cols_grid[ring_mask]
+def compute_flow_convergence(
+    aspect_array: np.ndarray,
+    house_rc: Tuple[int, int],
+    ring_mask: np.ndarray
+) -> float:
+    """Calculate flow convergence percentage"""
+    rows, cols = np.indices(aspect_array.shape)
+    rows_sel = rows[ring_mask]
+    cols_sel = cols[ring_mask]
     aspects_sel = aspect_array[ring_mask]
     hr, hc = house_rc
-    converging, total = 0, 0
+    conv, total = 0, 0
+    
     for r, c, a in zip(rows_sel, cols_sel, aspects_sel):
         if not np.isfinite(a):
             continue
@@ -396,8 +344,9 @@ def compute_flow_convergence(aspect_array, house_rc, ring_mask, rows_grid, cols_
         bearing_to_house = (np.degrees(np.arctan2(dc, -dr)) + 360) % 360
         diff = abs(a - bearing_to_house)
         if min(diff, 360 - diff) <= 45:
-            converging += 1
-    return (converging / total * 100.0) if total > 0 else 0.0
+            conv += 1
+    
+    return (conv / total * 100.0) if total > 0 else 0.0
 
 
 def compute_ring_metrics_unified(
@@ -465,9 +414,10 @@ def compute_ring_metrics_unified(
 
 
 def cardinal_direction(deg: float) -> str:
+    """Convert bearing to cardinal direction"""
     if not np.isfinite(deg):
         return "Unknown"
-    dirs = ["N","NE","E","SE","S","SW","W","NW"]
+    dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
     return dirs[int((deg + 22.5) / 45) % 8]
 
 
@@ -483,67 +433,153 @@ def _estimate_local_curvature(dem: np.ndarray, mask: np.ndarray) -> float:
 
 
 def generate_narrative(
-    summary_df,
+    summary_df: pd.DataFrame,
     dem: np.ndarray,
     slope: np.ndarray,
     aspect: np.ndarray,
     house_rc: Tuple[int, int],
+    *,
+    # Optional context (use if available)
+    global_risk: Optional[Dict[str, float]] = None,   # {target_lon, target_lat, target_risk, global_percentile, higher_pct}
+    house_elev_m: Optional[float] = None,             # not printed (kept for compatibility)
+    area_percentiles: Optional[Dict[str, float]] = None,
+    area_labels: Optional[Dict[str, str]] = None,
 ) -> str:
-    """英文解读文本，与最终脚本一致。"""
-    def get_row(r):
-        hit = summary_df[summary_df['Radius (m)'] == r]
+    """
+    Returns exactly TWO paragraphs:
+      P1: Terrain description at 500m + local (10m) slope/aspect/curvature + multi-scale slope + 500m convergence.
+      P2: Global composite risk sentence (score + percentile + intuitive 'less flood-prone than X%').
+    """
+
+    # ---------- helpers ----------
+    def _get_row(r: float):
+        hit = summary_df[summary_df["Radius (m)"] == r]
         return hit.iloc[0].to_dict() if len(hit) else None
 
-    r50  = get_row(50.0); r200 = get_row(200.0); r500 = get_row(500.0)
+    def _cardinal(deg: float) -> str:
+        if not np.isfinite(deg):
+            return "Unknown"
+        dirs = ["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"]
+        idx = int((deg % 360) / 22.5 + 0.5) % 16
+        return dirs[idx]
 
-    # 10 m 局部窗口（由主程序准备的 ring_masks 控制，这里只用于叙述）
-    # 调用方应在外部提供 ring_masks[10.0]；若没有，这里按全 False 处理。
+    def _median_in_mask(arr: np.ndarray, mask: np.ndarray) -> float:
+        vals = arr[mask]
+        return float(np.nanmedian(vals)) if np.isfinite(vals).any() else np.nan
+
+    def _local_curvature_masked(dem_: np.ndarray, mask_: np.ndarray) -> float:
+        """Small, safe curvature estimate over masked pixels (fallback if external util not present)."""
+        if not mask_.any():
+            return np.nan
+        # Sobel-ish second derivatives (very light-weight)
+        dzdy, dzdx = np.gradient(dem_)
+        d2y, _ = np.gradient(dzdy)
+        _, d2x = np.gradient(dzdx)
+        curv = d2x + d2y
+        vals = curv[mask_]
+        return float(np.nanmedian(vals)) if np.isfinite(vals).any() else np.nan
+
+    # ---------- pick scale rows ----------
+    r50  = _get_row(50.0)
+    r200 = _get_row(200.0)
+    r500 = _get_row(500.0)
+
+    # ---------- 10m mask from attrs (if provided) ----------
     mask10 = summary_df.attrs.get("ring_mask_10m", None)
     if mask10 is None:
         mask10 = np.zeros_like(dem, dtype=bool)
+        r, c = house_rc
+        if 0 <= r < dem.shape[0] and 0 <= c < dem.shape[1]:
+            # tiny 3x3 around house as a very small fallback "local" window
+            r0, r1 = max(0, r-1), min(dem.shape[0], r+2)
+            c0, c1 = max(0, c-1), min(dem.shape[1], c+2)
+            mask10[r0:r1, c0:c1] = True
 
-    local_slope_med = float(np.nanmedian(np.where(mask10, slope, np.nan)))
+    # ---------- local metrics (10m) ----------
+    local_slope_med = _median_in_mask(slope, mask10)
+
     aspects10 = np.where(mask10, aspect, np.nan)
     valid10 = aspects10[np.isfinite(aspects10)]
     if valid10.size > 0:
         sin_m = float(np.nanmean(np.sin(np.deg2rad(valid10))))
         cos_m = float(np.nanmean(np.cos(np.deg2rad(valid10))))
         dom10 = (np.degrees(np.arctan2(sin_m, cos_m)) + 360) % 360
-        dom10_card = cardinal_direction(dom10)
+        dom10_card = _cardinal(dom10)
     else:
         dom10, dom10_card = np.nan, "Unknown"
 
-    local_curv_med = _estimate_local_curvature(dem, mask10)
+    local_curv_med = _local_curvature_masked(dem, mask10)
 
-    parts = []
-    if r500:
-        parts.append(f"At 500 m, the home sits {r500['ΔElev_median (m)']:+.3f} m relative to the area median elevation.")
-    elif r200:
-        parts.append(f"At 200 m, the home sits {r200['ΔElev_median (m)']:+.3f} m relative to the area median elevation.")
+    # ---------- Paragraph 1: terrain description ----------
+    p1_parts = []
 
-    parts.append(f"Within 10 m, median slope is ~{local_slope_med:.1f}°, indicating "
-                 f"{'flat-to-gentle' if local_slope_med < 3 else 'a gentle incline' if local_slope_med < 6 else 'a noticeable incline'}.")
+    # 500 m Δelev relative to area median (fallback to 200m if 500m missing)
+    if r500 is not None and np.isfinite(r500.get("ΔElev_median (m)", np.nan)):
+        p1_parts.append(f"At 500 m, the home sits {r500['ΔElev_median (m)']:+.3f} m relative to the area median elevation.")
+    elif r200 is not None and np.isfinite(r200.get("ΔElev_median (m)", np.nan)):
+        p1_parts.append(f"At 200 m, the home sits {r200['ΔElev_median (m)']:+.3f} m relative to the area median elevation.")
 
+    # 10 m slope with qualitative label
+    if np.isfinite(local_slope_med):
+        label = ("flat-to-gentle" if local_slope_med < 3
+                 else "a gentle incline" if local_slope_med < 6
+                 else "a noticeable incline")
+        p1_parts.append(f"Within 10 m, median slope is ~{local_slope_med:.1f}°, indicating {label}.")
+
+    # local drainage direction from aspect
     if np.isfinite(dom10):
-        parts.append(f"Nearby ground tilts toward {dom10_card} (~{dom10:.0f}°), a likely drainage direction.")
+        p1_parts.append(f"Nearby ground tilts toward {dom10_card} (~{dom10:.0f}°), a likely drainage direction.")
 
+    # curvature tone
     if np.isfinite(local_curv_med):
         if local_curv_med < -1e-4:
-            parts.append("Local curvature suggests a slightly concave surface (minor water collection tendency).")
+            p1_parts.append("Local curvature suggests a slightly concave surface (minor water collection tendency).")
         elif local_curv_med > 1e-4:
-            parts.append("Local curvature suggests a slightly convex surface (ridge-like).")
+            p1_parts.append("Local curvature suggests a slightly convex surface (ridge-like).")
         else:
-            parts.append("Local curvature is near zero (essentially flat shape).")
+            p1_parts.append("Local curvature is near zero (essentially flat shape).")
 
-    ms = []
-    for row in [r50, r200, r500]:
-        if row:
-            ms.append(f"{int(row['Radius (m)'])} m: {row['Slope_median (°)']:.1f}°")
-    if ms:
-        parts.append("Median slope by scale — " + "; ".join(ms) + ".")
+    # multi-scale slope summary (only include scales that exist)
+    scales = []
+    if r50  is not None and np.isfinite(r50.get("Slope_median (°)", np.nan)):
+        scales.append(f"50 m: {r50['Slope_median (°)']:.1f}°")
+    if r200 is not None and np.isfinite(r200.get("Slope_median (°)", np.nan)):
+        scales.append(f"200 m: {r200['Slope_median (°)']:.1f}°")
+    if r500 is not None and np.isfinite(r500.get("Slope_median (°)", np.nan)):
+        scales.append(f"500 m: {r500['Slope_median (°)']:.1f}°")
+    if scales:
+        p1_parts.append("Median slope by scale — " + "; ".join(scales) + ".")
 
-    if r500:
-        parts.append(f"At 500 m, ~{r500['Convergence (%)']:.0f}% of surrounding surfaces point downslope toward the home; "
-                     f"dominant downslope direction is {cardinal_direction(r500['Dominant Aspect (°)'])} "
-                     f"(~{r500['Dominant Aspect (°)']:.0f}°).")
-    return " ".join(parts)
+    # 500 m convergence/down-slope toward home + dominant aspect
+    if r500 is not None:
+        conv = r500.get("Convergence (%)", np.nan)
+        dom  = r500.get("Dominant Aspect (°)", np.nan)
+        if np.isfinite(conv) and np.isfinite(dom):
+            p1_parts.append(
+                f"At 500 m, ~{conv:.0f}% of surrounding surfaces point downslope toward the home; "
+                f"dominant downslope direction is {_cardinal(dom)} (~{dom:.0f}°)."
+            )
+
+    paragraph_1 = " ".join(p1_parts).strip()
+
+    # ---------- Paragraph 2: global composite risk ----------
+    paragraph_2 = ""
+    if isinstance(global_risk, dict):
+        try:
+            tgt_r  = float(global_risk.get("target_risk", np.nan))
+            pct    = float(global_risk.get("global_percentile", np.nan))
+            higher = float(global_risk.get("higher_pct", np.nan))
+            if np.isfinite(tgt_r) and np.isfinite(pct) and np.isfinite(higher):
+                paragraph_2 = (
+                    f"The terrain risk model estimates a terrain risk score of {tgt_r:.3f} for this location, "
+                    f"which ranks at the {pct:.1f}th percentile across the entire area, "
+                    f"meaning it is higher and less flood-prone than about {higher:.1f}% of the terrain in this DEM region."
+                )
+        except Exception:
+            paragraph_2 = ""
+
+    # Ensure we only return exactly two paragraphs (second may be empty if inputs missing)
+    if paragraph_2:
+        return f"{paragraph_1}\n\n{paragraph_2}"
+    else:
+        return paragraph_1

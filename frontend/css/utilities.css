@@ -1,0 +1,142 @@
+/**
+ * Utilities CSS
+ * Custom Tailwind utilities and CSS custom properties
+ */
+
+/* CSS Custom Properties for theming */
+:root {
+    /* Color Palette */
+    --bg: #050a14;
+    --panel: #0d1630cc;
+    --card: #101b38cc;
+    --muted: #6e87b9;
+    --text: #e8eeff;
+    --brand: #00e5ff;
+    --accent: #00ff9d;
+    --danger: #ff4d6a;
+    --ok: #00ff9d;
+    --warn: #ffd60a;
+    
+    /* Borders and Effects */
+    --ring: 1px solid rgba(0, 229, 255, 0.2);
+    --glow: 0 0 10px rgba(0, 229, 255, 0.5), 0 0 20px rgba(0, 229, 255, 0.2);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
+    --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.5);
+    
+    /* Gradients */
+    --gradient-primary: linear-gradient(135deg, #0099ff, #00e5ff);
+    
+    /* Transitions */
+    --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  
+  /* Base Styles */
+  * {
+    box-sizing: border-box;
+    max-width: 100%;
+  }
+  
+  html,
+  body {
+    height: 100%;
+    overflow-x: hidden;
+  }
+  
+  body {
+    margin: 0;
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Arial;
+    color: var(--text);
+    background-color: var(--bg);
+  }
+  
+  /* Tailwind Custom Utilities */
+  @layer utilities {
+    /* Text Effects */
+    .text-shadow {
+      text-shadow: 0 0 5px rgba(0, 229, 255, 0.7);
+    }
+    
+    .text-shadow-lg {
+      text-shadow: 0 0 10px rgba(0, 229, 255, 0.9);
+    }
+    
+    /* Border Effects */
+    .border-glow {
+      box-shadow: 0 0 5px #00e5ff, 0 0 10px #00e5ff;
+    }
+    
+    /* Background Patterns */
+    .bg-grid {
+      background-image: 
+        linear-gradient(rgba(0, 229, 255, 0.1) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0, 229, 255, 0.1) 1px, transparent 1px);
+      background-size: 20px 20px;
+    }
+    
+    .bg-tech {
+      background-image: 
+        radial-gradient(circle at 20% 50%, rgba(0, 229, 255, 0.1) 0%, transparent 60%),
+        linear-gradient(rgba(0, 229, 255, 0.05) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0, 229, 255, 0.05) 1px, transparent 1px);
+      background-size: 100% 100%, 30px 30px, 30px 30px;
+    }
+    
+    /* Glass Effects */
+    .glass-effect {
+      background: rgba(13, 22, 48, 0.7);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(0, 229, 255, 0.2);
+    }
+    
+    .glass-card {
+      background: rgba(16, 27, 56, 0.7);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      border: 1px solid rgba(0, 229, 255, 0.15);
+      transition: all 0.3s ease;
+    }
+    
+    .glass-card:hover {
+      border-color: rgba(0, 229, 255, 0.4);
+      box-shadow: 0 8px 30px rgba(0, 229, 255, 0.15);
+      transform: translateY(-2px);
+    }
+    
+    /* Progress Bar */
+    .progress-bar-glow {
+      box-shadow: 0 0 5px #00e5ff, 0 0 10px #00e5ff;
+    }
+    
+    /* Custom Scrollbar */
+    .scrollbar-thin {
+      scrollbar-width: thin;
+      scrollbar-color: rgba(0, 229, 255, 0.5) rgba(13, 22, 48, 0.5);
+    }
+    
+    .scrollbar-thin::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    
+    .scrollbar-thin::-webkit-scrollbar-track {
+      background: rgba(13, 22, 48, 0.5);
+    }
+    
+    .scrollbar-thin::-webkit-scrollbar-thumb {
+      background-color: rgba(0, 229, 255, 0.5);
+      border-radius: 3px;
+    }
+  }
+  
+  /* Image Handling for Empty Sources */
+  img:not([src]),
+  img[src=""],
+  img[src="#"],
+  img[src="null"] {
+    visibility: hidden;
+  }
+  
+  img[src]:not([src=""]):not([src="#"]):not([src="null"]) {
+    visibility: visible;
+  }

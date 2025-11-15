@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-COMPLETE TERRAIN ANALYSIS PIPELINE (Single-File Entry Point)
+COMPLETE TERRAIN ANALYSIS PIPELINE
 =============================================================
 Full end-to-end execution
 All parameters exposed in config dict.
@@ -13,13 +13,20 @@ import json
 import numpy as np
 import pandas as pd
 import matplotlib
+from pathlib import Path 
 matplotlib.use('Agg')
 import rasterio
-from pathlib import Path 
-import re
-from datetime import datetime
-import plotly.io as pio
-pio.renderers.default = "browser"
+
+from .helpers import (
+    _lonlat_to_3857,
+    _lonlat_to_crs,
+    house_rc_from_lonlat,
+    build_ring_masks,
+    compute_ring_metrics_simple,
+    save_table,
+    compute_global_composite_risk_map,
+    set_risk_building_poly, 
+)
 
 from .geocode import resolve_location_from_user_input
 from .osm import fetch_building_osm
@@ -27,14 +34,14 @@ from .dem import (
     discover_usgs_lidar_dataset,
     build_multiple_dems,
     load_dem,
-    build_all_circle_masks,
 )
 from .terrain import (
     estimate_house_ground_adaptive,
     derive_slope_aspect_curvature,
     classify_terrain_adaptive,
-    compute_ring_metrics_unified,
     generate_narrative, 
+    cardinal_direction,
+    compute_flow_convergence,
 )
 
 from .viz import (
@@ -45,8 +52,6 @@ from .viz import (
     add_3d_figures_to_pipeline,
     DEFAULT_CONFIG as VIZ_DEFAULT_CONFIG,
 )
-
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..")) 
 
 # ============================================
 # COMPLETE CONFIGURATION (NO HARDCODES!)
@@ -62,23 +67,23 @@ class PipelineConfig:
         self.address: str = ""
         
         # ===== AOI & DEM =====
-        self.aoi_radius_m: float = 500.0          # User-selectable!
-        self.dem_resolution_m: float = 1.0
-        self.dem_nodata: float = -9999.0
-        self.pdal_threads: int = 8
+        self.aoi_radius_m: float = 500.0          # User AOI radius in meters
+        self.dem_resolution_m: float = 1.0        # DEM resolution in meters
+        self.dem_nodata: float = -9999.0          # DEM NoData sentinel
+        self.pdal_threads: int = 8                # Threads for PDAL processing
         
         # DEM generation - support user AOI + 500m reference
-        self.dem_for_user_aoi: bool = True         # Generate DEM for user AOI
-        self.reference_radius_m: float = 500.0     # Always generate for reference
+        self.dem_for_user_aoi: bool = True        # Generate DEM for user AOI
+        self.reference_radius_m: float = 500.0    # Always generate reference DEM (500m)
         
         # ===== OSM Building =====
-        self.osm_buffer_m: float = 120.0           # Search radius (dynamic!)
-        self.osm_timeout_s: int = 25
+        self.osm_buffer_m: float = 120.0          # Search radius for OSM footprints (meters)
+        self.osm_timeout_s: int = 25              # Overpass timeout
         
         # ===== House Estimation (all parametrized!) =====
-        self.house_buffer_m: float = 3.0
-        self.plane_band_inner_m: float = 5.0
-        self.plane_band_outer_m: float = 15.0
+        self.house_buffer_m: float = 3.0          # Fallback circular building radius (m)
+        self.plane_band_inner_m: float = 5.0      # Inner radius for plane fitting (m)
+        self.plane_band_outer_m: float = 15.0     # Outer radius for plane fitting (m)
         
         # Adaptive parameters (no hardcodes!)
         self.min_size_edge: int = 10
@@ -90,9 +95,8 @@ class PipelineConfig:
         self.fallback_sample_size: int = 150
         
         # ===== Terrain Classification (parametrized!) =====
-        self.slope_low_threshold: float = 2.0      # < 2° = Low-Lying
-        self.slope_mod_threshold: float = 5.0      # 2-5° = Moderate
-                                                    # >= 5° = Steep
+        self.slope_low_threshold: float = 2.0     # < 2° = flat / low slope
+        self.slope_mod_threshold: float = 5.0     # 2–5° = gentle; >= 5° = steep
         
         # ===== Ring Definitions (parametrized!) =====
         self.ring_bands_m: Tuple[Tuple[float, float], ...] = (
@@ -101,11 +105,11 @@ class PipelineConfig:
             (15.0, 30.0)
         )
         
-        self.pad_inner_m: float = 0.8
-        self.pad_outer_m: float = 2.5
+        self.pad_inner_m: float = 0.8             # Inner buffer for edge ring
+        self.pad_outer_m: float = 2.5             # Outer buffer for edge ring
         
-        self.pooled_outer_min: float = 3.0
-        self.pooled_outer_max: float = 25.0
+        self.pooled_outer_min: float = 3.0        # Inner radius for pooled outer ring
+        self.pooled_outer_max: float = 25.0       # Outer radius for pooled outer ring
         
         # ===== Ring Metrics Radii (parametrized!) =====
         self.ring_metrics_radii: List[float] = [50.0, 100.0, 200.0, 300.0, 500.0]
@@ -114,413 +118,27 @@ class PipelineConfig:
         # ===== Visualization =====
         self.viz_config: Dict[str, Any] = VIZ_DEFAULT_CONFIG.copy()
         
+        # ===== Global Composite Risk (single-point over 500m DEM) =====
+        self.global_gamma: float = 4.0
+        self.global_res_window_m: float = 10.0
+        self.global_weights: Dict[str, float] = dict(
+            global_=0.50,
+            delta=0.20,
+            slope=0.20,
+            asin=0.05,
+            acos=0.05
+        )
+
         # ===== Output =====
         self.output_dir: str = "./outputs"
-        self.output_format: str = "csv"             # parquet, csv, or both
+        self.output_format: str = "csv"           # 'csv', 'parquet', or 'both'
         self.generate_narrative: bool = True
         self.verbose: bool = True
         self.save_3d: bool = True
         
-        # Derivative fields
+        # Derived fields (set during runtime)
         self.dataset_name: Optional[str] = None
         self.outdir: Optional[str] = None
-
-
-# ============================================
-# HELPER FUNCTIONS
-# ============================================
-def _slugify_address(address: str, fallback: str = "") -> str:
-    if not address:
-        return (fallback or "address_unknown")
-    s = re.sub(r"[^A-Za-z0-9]+", "_", address.strip())
-    s = re.sub(r"_+", "_", s).strip("_")
-    if not s:
-        s = (fallback or "address_unknown")
-    return s[:80] 
-
-def _lonlat_to_3857(lon: float, lat: float) -> Tuple[float, float]:
-    """Convert WGS84 to Web Mercator"""
-    import pyproj
-    t = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True).transform
-    return t(lon, lat)
-
-def _lonlat_to_crs(lon: float, lat: float, dst_crs) -> Tuple[float, float]:
-    import pyproj
-    tr = pyproj.Transformer.from_crs("EPSG:4326", dst_crs, always_xy=True).transform
-    return tr(lon, lat)
-
-def house_rc_from_lonlat(meta: Dict, lon: float, lat: float) -> Tuple[int, int]:
-    """Find raster cell (row, col) for given (lon, lat)"""
-    dst_crs = meta.get("crs")
-    cx, cy = _lonlat_to_crs(lon, lat, dst_crs)
-    xs, ys = meta["xs"], meta["ys"]
-    d2 = (xs - cx)**2 + (ys - cy)**2
-    r, c = np.unravel_index(np.nanargmin(d2), xs.shape)
-    return int(r), int(c)
-
-
-def build_ring_masks(
-    meta: Dict,
-    radii: List[float],
-    lon: float,
-    lat: float
-) -> Dict[float, np.ndarray]:
-    """Build circular masks for multiple radii"""
-    dst_crs = meta.get("crs")
-    cx, cy = _lonlat_to_crs(lon, lat, dst_crs)
-    xs, ys = meta["xs"], meta["ys"]
-    dist = np.sqrt((xs - cx)**2 + (ys - cy)**2)
-    masks = {}
-    for r in radii:
-        rr = float(r)
-        m = (dist <= rr) & np.isfinite(xs) & np.isfinite(ys)
-        masks[rr] = m
-    return masks
-
-
-def cardinal_direction(deg: float) -> str:
-    """Convert bearing to cardinal direction"""
-    if not np.isfinite(deg):
-        return "Unknown"
-    dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
-    return dirs[int((deg + 22.5) / 45) % 8]
-
-
-def compute_flow_convergence(
-    aspect_array: np.ndarray,
-    house_rc: Tuple[int, int],
-    ring_mask: np.ndarray
-) -> float:
-    """Calculate flow convergence percentage"""
-    rows, cols = np.indices(aspect_array.shape)
-    rows_sel = rows[ring_mask]
-    cols_sel = cols[ring_mask]
-    aspects_sel = aspect_array[ring_mask]
-    hr, hc = house_rc
-    conv, total = 0, 0
-    
-    for r, c, a in zip(rows_sel, cols_sel, aspects_sel):
-        if not np.isfinite(a):
-            continue
-        total += 1
-        dr, dc = hr - r, hc - c
-        bearing_to_house = (np.degrees(np.arctan2(dc, -dr)) + 360) % 360
-        diff = abs(a - bearing_to_house)
-        if min(diff, 360 - diff) <= 45:
-            conv += 1
-    
-    return (conv / total * 100.0) if total > 0 else 0.0
-
-
-def compute_ring_metrics_simple(
-    dem: np.ndarray,
-    slope: np.ndarray,
-    aspect: np.ndarray,
-    house_rc: Tuple[int, int],
-    house_elev: float,
-    ring_mask: np.ndarray,
-    slope_low_threshold: float = 2.0,
-    slope_mod_threshold: float = 5.0,
-) -> Optional[Dict]:
-    """Compute comprehensive ring metrics (all parametrized!)"""
-    if ring_mask.sum() == 0:
-        return None
-    
-    elevs = dem[ring_mask]
-    med = float(np.nanmedian(elevs))
-    delta = float(house_elev - med)
-    pct_higher = float((elevs > house_elev).sum() / elevs.size * 100.0)
-    pct_lower = float((elevs < house_elev).sum() / elevs.size * 100.0)
-    
-    s = slope[ring_mask]
-    slope_mean = float(np.nanmean(s))
-    slope_median = float(np.nanmedian(s))
-    p25, p75 = float(np.nanpercentile(s, 25)), float(np.nanpercentile(s, 75))
-    pct_flat = float((s < slope_low_threshold).sum() / s.size * 100.0)
-    pct_gentle = float(((s >= slope_low_threshold) & (s < slope_mod_threshold)).sum() / s.size * 100.0)
-    pct_steep = float((s >= slope_mod_threshold).sum() / s.size * 100.0)
-    
-    conv = float(compute_flow_convergence(aspect, house_rc, ring_mask))
-    
-    asp = aspect[ring_mask]
-    vals = asp[np.isfinite(asp)]
-    if vals.size > 0:
-        sin_m = np.nanmean(np.sin(np.deg2rad(vals)))
-        cos_m = np.nanmean(np.cos(np.deg2rad(vals)))
-        dom = (np.degrees(np.arctan2(sin_m, cos_m)) + 360) % 360
-    else:
-        dom = np.nan
-    
-    return {
-        'n_pixels': int(ring_mask.sum()),
-        'ring_median': med,
-        'delta_median': delta,
-        'pct_higher': pct_higher,
-        'pct_lower': pct_lower,
-        'slope_mean': slope_mean,
-        'slope_median': slope_median,
-        'slope_p25': p25,
-        'slope_p75': p75,
-        'pct_flat': pct_flat,
-        'pct_gentle': pct_gentle,
-        'pct_steep': pct_steep,
-        'convergence_%': conv,
-        'dominant_aspect': float(dom) if np.isfinite(dom) else np.nan,
-    }
-
-
-
-def save_table(
-    df: pd.DataFrame,
-    base_path: str,
-    formats: List[str] = ["csv"]
-) -> Dict[str, str]:
-    """保存表格；返回 {<文件名>: <绝对路径>}，避免键冲突并匹配前端期待"""
-    results: Dict[str, str] = {}
-
-    for fmt in formats:
-        if fmt == "parquet":
-            p = base_path + ".parquet"
-            try:
-                import pyarrow as pa, pyarrow.parquet as pq, pyarrow.fs as pafs
-                table = pa.Table.from_pandas(df)
-                fs = pafs.LocalFileSystem()
-                pq.write_table(table, p, filesystem=fs)
-                results[Path(p).name] = p   # ← 关键：用文件名当 key
-            except Exception:
-                p_csv = base_path + ".csv"
-                df.to_csv(p_csv, index=False)
-                results[Path(p_csv).name] = p_csv
-        elif fmt == "csv":
-            p = base_path + ".csv"
-            df.to_csv(p, index=False)
-            results[Path(p).name] = p      # ← 关键：用文件名当 key
-        # 其它格式略
-
-    return results
-
-
-# ============================================
-# DEM GENERATION WITH DSM SUPPORT
-# ============================================
-
-def build_pdal_grid_with_dsm(ept_url: str, polygon_wkt: str, res: float, out_path: str, 
-                           kind: str = "dtm", nodata: float = -9999, threads: int = 8):
-    """Build PDAL pipeline for DTM or DSM generation"""
-    base = [
-        {
-            "type": "readers.ept", 
-            "filename": ept_url, 
-            "threads": threads,
-            "polygon": polygon_wkt, 
-            "resolution": res
-        },
-        {
-            "type": "filters.outlier", 
-            "method": "statistical", 
-            "mean_k": 8, 
-            "multiplier": 2.5
-        },
-    ]
-    
-    if kind == "dtm":
-        # For DTM: ground classification and ground points only
-        base.insert(1, {
-            "type": "filters.smrf", 
-            "window": 32.0, 
-            "slope": 0.2, 
-            "threshold": 0.45, 
-            "scalar": 1.25
-        })
-        base.append({
-            "type": "filters.range", 
-            "limits": "Classification[2:2]"  # Ground points only
-        })
-        output_type = "mean"
-    else:
-        # For DSM: all points (surface model)
-        output_type = "max"
-    
-    pipeline = base + [
-        {
-            "type": "writers.gdal",
-            "filename": out_path,
-            "resolution": res,
-            "output_type": output_type,
-            "gdaldriver": "GTiff",
-            "nodata": nodata,
-            "gdalopts": "COMPRESS=LZW,TILED=YES,BIGTIFF=YES"
-        }
-    ]
-    
-    return {"pipeline": pipeline}
-
-
-def _preflight_ept_bounds(dataset_name: str, lon: float, lat: float, radius_m: float) -> dict:
-    """
-    用 EPT 的 bounds 估算 AOI 最大可用半径；若目标半径超出，返回 ok=False 和建议的 max_radius_m
-    """
-    import json
-    import requests
-    import pyproj
-
-    ept_url = f"https://s3-us-west-2.amazonaws.com/usgs-lidar-public/{dataset_name}/ept.json"
-    try:
-        meta = requests.get(ept_url, timeout=10).json()
-    except Exception:
-        # 取不到元数据就让 PDAL 去失败；不要在预检阶段阻断
-        return {"ok": True}
-
-    # CRS：优先用 WKT；否则拼接 authority/horizontal（常见：EPSG + 代码）
-    srs = meta.get("srs", {}) or {}
-    srs_wkt = srs.get("wkt")
-    if not srs_wkt:
-        auth = srs.get("authority")
-        horiz = srs.get("horizontal") or srs.get("epsg")
-        if auth and horiz:
-            srs_wkt = f"EPSG:{horiz}"
-        else:
-            srs_wkt = "EPSG:3857"
-
-    bounds = meta.get("boundsConforming") or meta.get("bounds")
-    if not bounds:
-        return {"ok": True}
-
-    # 兼容两种结构：[[minx,miny,minz],[maxx,maxy,maxz]] 或 [minx,miny,minz,maxx,maxy,maxz]
-    if isinstance(bounds[0], (list, tuple)):
-        (minx, miny, _minz), (maxx, maxy, _maxz) = bounds
-    else:
-        minx, miny, _minz, maxx, maxy, _maxz = bounds
-
-    # 把 WGS84 的 lon/lat 转到 EPT 的坐标系
-    to_ept = pyproj.Transformer.from_crs("EPSG:4326", srs_wkt, always_xy=True).transform
-    cx, cy = to_ept(lon, lat)  # 注意：to_ept 是函数
-
-    # 离边界盒四边的最小距离就是“最大可用半径”
-    max_r = min(cx - minx, maxx - cx, cy - miny, maxy - cy)
-    if max_r <= 0:
-        return {
-            "ok": False,
-            "error_code": "AOI_OUTSIDE_EPT_BOUNDS",
-            "message": "Location is outside the LiDAR dataset grid.",
-            "max_radius_m": 0.0
-        }
-
-    if radius_m > max_r:
-        return {
-            "ok": False,
-            "error_code": "AOI_OUTSIDE_EPT_BOUNDS",
-            "message": "AOI exceeds LiDAR grid extent for this dataset.",
-            "max_radius_m": float(max_r)
-        }
-
-    return {"ok": True, "max_radius_m": float(max_r)}
-
-
-
-
-
-def generate_dem_with_dsm(dataset_name: str, lat: float, lon: float, 
-                         dem_specs: Dict[str, Dict], nodata: float = -9999, 
-                         threads: int = 8, verbose: bool = True):
-    """Generate both DTM and DSM for each specification + 缓存复用"""
-    import pdal
-    from shapely.geometry import Point
-    import pyproj
-    
-    # 缓存关键：用「经纬度+半径+分辨率」生成唯一标识（保留6位小数，避免精度冲突）
-    def get_cache_key(lat, lon, radius, res):
-        return f"cache_{lat:.6f}_{lon:.6f}_{radius:.0f}m_{res:.1f}m"
-    
-    # 缓存目录（独立于任务输出，方便复用）
-    CACHE_DIR = os.path.join(PROJECT_ROOT, "dem_cache")
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    
-    # Convert to meters (EPSG:3857)
-    def to_3857(x, y):
-        t = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True).transform
-        return t(x, y)
-    
-    cx3857, cy3857 = to_3857(lon, lat)
-    ept_url = f"https://s3-us-west-2.amazonaws.com/usgs-lidar-public/{dataset_name}/ept.json"
-    
-    results = {}
-    
-    for dem_key, spec in dem_specs.items():
-        radius_m = spec["radius_m"]
-        resolution_m = spec["resolution_m"]
-        # —— EPT 边界预检：先判断 AOI 是否会越界
-        pre = _preflight_ept_bounds(dataset_name, lon, lat, radius_m)
-        if not pre.get("ok", True):
-            # 抛出带 code 的异常，上层会封装到 /runs/:id 状态中
-            raise RuntimeError(json.dumps({
-                "error_code": pre.get("error_code", "AOI_OUTSIDE_EPT_BOUNDS"),
-                "message": pre.get("message", "AOI is outside of LiDAR grid."),
-                "max_radius_m": pre.get("max_radius_m", 0.0),
-                "dataset": dataset_name,
-                "radius_m": radius_m,
-                "resolution_m": resolution_m
-            }))
-        cache_key = get_cache_key(lat, lon, radius_m, resolution_m)
-        cache_dtm_path = os.path.join(CACHE_DIR, f"{cache_key}_dtm.tif")
-        cache_dsm_path = os.path.join(CACHE_DIR, f"{cache_key}_dsm.tif")
-        
-        # 检查缓存：如果已存在，直接复用，跳过PDAL生成
-        if os.path.exists(cache_dtm_path) and os.path.exists(cache_dsm_path):
-            if verbose:
-                print(f"  🚀 复用缓存的 {radius_m}m DEM (DTM+DSM)")
-            results[dem_key] = {
-                "dtm_path": cache_dtm_path,
-                "dsm_path": cache_dsm_path,
-                "radius_m": radius_m,
-                "resolution_m": resolution_m
-            }
-            continue
-        
-        # 缓存不存在，生成DEM（原逻辑不变）
-        circle_geom = Point(cx3857, cy3857).buffer(float(radius_m), resolution=128)
-        poly_wkt = circle_geom.wkt
-        
-        try:# 生成DTM（保存到缓存目录）
-            if not os.path.exists(cache_dtm_path):
-                if verbose:
-                    print(f"Building {radius_m}m DTM → {cache_dtm_path}")
-                pipeline_json = build_pdal_grid_with_dsm(
-                    ept_url, poly_wkt, resolution_m, cache_dtm_path, "dtm", nodata, threads
-                )
-                pdal.Pipeline(json.dumps(pipeline_json)).execute()
-            
-            # 生成DSM（保存到缓存目录）
-            if not os.path.exists(cache_dsm_path):
-                if verbose:
-                    print(f"Building {radius_m}m DSM → {cache_dsm_path}")
-                pipeline_json = build_pdal_grid_with_dsm(
-                    ept_url, poly_wkt, resolution_m, cache_dsm_path, "dsm", nodata, threads
-                )
-                pdal.Pipeline(json.dumps(pipeline_json)).execute()
-
-        except Exception as e:
-            msg = str(e)
-            if "Grid width out of range" in msg or "writers.gdal" in msg:
-                raise RuntimeError(json.dumps({
-                    "error_code": "AOI_OUTSIDE_EPT_BOUNDS",
-                    "message": "AOI exceeds LiDAR grid extent (PDAL writers.gdal).",
-                    "max_radius_m": pre.get("max_radius_m"),   # 预检若得到则透传
-                    "dataset": dataset_name,
-                    "radius_m": radius_m,
-                    "resolution_m": resolution_m
-                }))
-            raise
-        # 结果指向缓存文件
-        results[dem_key] = {
-            "dtm_path": cache_dtm_path,
-            "dsm_path": cache_dsm_path,
-            "radius_m": radius_m,
-            "resolution_m": resolution_m
-        }
-    
-    return results
-
 
 # ============================================
 # MAIN PIPELINE
@@ -529,16 +147,17 @@ def generate_dem_with_dsm(dataset_name: str, lat: float, lon: float,
 def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
     """
     Complete terrain analysis pipeline.
-    All parameters in config - ZERO hardcodes!
+    All parameters in config - zero hardcodes.
     """
-    # --- 地理编码和坐标验证 ---
+    # --- Geocoding and coordinate validation ---
     lat_ok = isinstance(config.lat, (int, float)) and np.isfinite(config.lat)
     lon_ok = isinstance(config.lon, (int, float)) and np.isfinite(config.lon)
 
-    # 地理编码处理
+    # If address is provided but lat/lon are missing → geocode first
     if config.address and not (lat_ok and lon_ok):
         lat, lon, faddr = resolve_location_from_user_input(config.address)
         if lat is None or lon is None:
+            # Keep error message text as originally written (Chinese)
             raise RuntimeError(json.dumps({
                 "error_code": "GEOCODING_FAILED",
                 "message": f"无法解析地址: {config.address}",
@@ -547,7 +166,7 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
         config.lat, config.lon = float(lat), float(lon)
         config.address = faddr
 
-    # 最终坐标验证
+    # Final sanity check on coordinates
     lat_ok = isinstance(config.lat, (int, float)) and np.isfinite(config.lat)
     lon_ok = isinstance(config.lon, (int, float)) and np.isfinite(config.lon)
     if not (lat_ok and lon_ok):
@@ -563,6 +182,7 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
         aoi_radius_ref=config.reference_radius_m,
     )
 
+    # If relocation is successful and coordinates changed, adopt relocated point
     if reloc["success"] and (reloc["relocated_lat"] != config.lat or reloc["relocated_lon"] != config.lon):
         if config.verbose:
             print("\n[SMART RELOCATION]")
@@ -574,7 +194,7 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
     else:
         selected_building_from_relocation = None
 
-    # --- 创建输出目录（在重定位之后，确保使用最终坐标）---
+    # --- Create output directory AFTER potential relocation, so it reflects final location ---
     config.outdir = config.output_dir
     os.makedirs(config.outdir, exist_ok=True)
 
@@ -608,36 +228,31 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
     if config.verbose:
         print(f"Dataset: {config.dataset_name}")
     
-    # Create output directory
-    config.outdir = config.output_dir
-    os.makedirs(config.outdir, exist_ok=True)
-    
     # ===== STEP 2: DEM Generation (DTM + DSM) =====
     if config.verbose:
         print("\n" + "=" * 90)
-        print("STEP 2: DEM GENERATION (DTM + DSM)")
+        print("STEP 2: DEM GENERATION")
         print("=" * 90)
-    # 在 STEP 2 的 dem_specs 定义前添加：
+
     dem_specs = {}
 
-    if config.aoi_radius_m <= 100:
-        user_resolution = 2.0
-    else:
-        user_resolution = 1.0
-
-# 500m参考DEM（固定1m分辨率）
+    # 500m reference DEM (fixed 1m resolution)
     dem_specs["dem_500m"] = {
         "out_path": os.path.join(config.outdir, "dem_500m_dtm.tif"),
         "radius_m": config.reference_radius_m,
-        "resolution_m": 1.0,  # 参考DEM保持高精度
+        "resolution_m": 1.0,
     }
+
+    # User AOI DEM (optional, can be same as 500m)
     if config.aoi_radius_m != config.reference_radius_m:
-# 用户半径DEM（动态分辨率）
         user_radius_key = f"dem_{int(config.aoi_radius_m)}m"
         dem_specs[user_radius_key] = {
-            "out_path": os.path.join(config.outdir, f"dem_{int(config.aoi_radius_m)}m_dtm.tif"),
+            "out_path": os.path.join(
+                config.outdir,
+                f"dem_{int(config.aoi_radius_m)}m_dtm.tif"
+            ),
             "radius_m": config.aoi_radius_m,
-            "resolution_m": user_resolution,  # 动态分辨率生效
+            "resolution_m": 1.0,
         }
     else:
         user_radius_key = "dem_500m"
@@ -646,28 +261,26 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
         print(f"DEM specifications:")
         print(f"  - 500m reference: {dem_specs['dem_500m']['resolution_m']}m resolution")
         print(f"  - {config.aoi_radius_m}m user: {dem_specs[user_radius_key]['resolution_m']}m resolution")
-    # Generate both DTM and DSM
+
     try:
-        dem_results = generate_dem_with_dsm(
+        dem_results = build_multiple_dems(
             dataset_name=config.dataset_name,
             lat=config.lat,
             lon=config.lon,
             dem_specs=dem_specs,
             nodata=config.dem_nodata,
             threads=config.pdal_threads,
-            verbose=config.verbose
         )
     except RuntimeError as e:
-        # 透传我们抛出的结构化错误（JSON 字符串），让上游 /runs 能拿到 error_code 等
+        # If our code raised a structured JSON error, propagate it as-is
         try:
             err = json.loads(str(e))
         except Exception:
-            err = {"error_code":"PIPELINE_ERROR","message":str(e)}
-        # 直接再抛一次，让调用方（pipeline_runner）记成 error 状态并把 err 带回
+            err = {"error_code": "PIPELINE_ERROR", "message": str(e)}
         raise RuntimeError(json.dumps(err))
 
     if config.verbose:
-        print(f"Generated {len(dem_results)} DEM pairs (DTM + DSM)")
+        print(f"Generated {len(dem_results)} DEM")
     
     # ===== STEP 3: Load Primary DEM =====
     if config.verbose:
@@ -675,41 +288,52 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
         print("STEP 3: LOADING DEM & BUILDING MASKS")
         print("=" * 90)
 
+    # Load user AOI DEM
     user_dem_result = dem_results[user_radius_key]
-    user_dem_path = user_dem_result["dtm_path"]
+    user_dem_path = user_dem_result.get("tif_path", user_dem_result.get("dtm_path"))
     dem_user, meta_user = load_dem(user_dem_path, nodata=config.dem_nodata)
-    mask_user = build_ring_masks(meta_user, [config.aoi_radius_m], config.lon, config.lat)[config.aoi_radius_m]
+    mask_user = build_ring_masks(
+        meta_user, [config.aoi_radius_m], config.lon, config.lat
+    )[config.aoi_radius_m]
     
-    # 加载500m参考DEM（右图用）
-    ref_dem_result = dem_results["dem_500m"] 
-    ref_dem_path = ref_dem_result["dtm_path"]
+    # Load 500m reference DEM
+    ref_dem_result = dem_results["dem_500m"]
+    ref_dem_path = ref_dem_result.get("tif_path", ref_dem_result.get("dtm_path"))
     dem_500, meta_500 = load_dem(ref_dem_path, nodata=config.dem_nodata)
-    mask_500 = build_ring_masks(meta_500, [config.reference_radius_m], config.lon, config.lat)[config.reference_radius_m]
-    dem_arr = dem_500["arr"]  # 关键：定义 dem_arr（后续分析用）
-    meta = meta_500  # 关键：定义 meta（用于构建ring_masks_all）
+    mask_500 = build_ring_masks(
+        meta_500, [config.reference_radius_m], config.lon, config.lat
+    )[config.reference_radius_m]
+
+    # For convenience: use the 500m DEM as the main array/meta
+    dem_arr = dem_500["arr"]
+    meta = meta_500
 
     if config.verbose:
         print(f"User DEM ({config.aoi_radius_m}m): {dem_user['arr'].shape}")
         print(f"Reference DEM (500m): {dem_500['arr'].shape}")
 
-    # Build masks for all radii
-    all_radii = sorted(set(config.ring_analysis_radii + [config.aoi_radius_m, config.reference_radius_m]))
+    # Build masks for all analysis radii
+    all_radii = sorted(
+        set(config.ring_analysis_radii + [config.aoi_radius_m, config.reference_radius_m])
+    )
     ring_masks_all = build_ring_masks(meta, all_radii, config.lon, config.lat)
-    # Get mask for user AOI
-    mask_user_aoi = ring_masks_all.get(config.aoi_radius_m, ring_masks_all[config.reference_radius_m])
+
+    # Primary AOI mask (user radius; fallback to 500m if missing)
+    mask_user_aoi = ring_masks_all.get(
+        config.aoi_radius_m, ring_masks_all[config.reference_radius_m]
+    )
     
     if config.verbose:
         print(f"DEM shape: {dem_arr.shape}")
         print(f"Primary mask ({config.aoi_radius_m}m): {mask_user_aoi.sum()} pixels")
     
     # ===== STEP 4: Fetch OSM Building =====
-    # ===== STEP 4: FETCHING OSM BUILDING =====
     if config.verbose:
         print("\n" + "=" * 90)
         print("STEP 4: FETCHING OSM BUILDING")
         print("=" * 90)
 
-    # 复用 STEP 0 的重定位结果；否则再抓 OSM
+    # Reuse relocation result from STEP 0 if available; otherwise query OSM
     if selected_building_from_relocation is not None:
         osm_result = {
             "success": True,
@@ -726,8 +350,9 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
             timeout_s=config.osm_timeout_s
         )
 
-    # 半径闸门：太远就弃用
+    # Distance gate: discard footprints that are too far from AOI
     def _distance_m_safe(sel, lon0, lat0):
+        """Safely compute footprint distance from center in meters."""
         try:
             d = float(sel.get("distance_m", float("nan")))
             if not np.isfinite(d):
@@ -737,49 +362,67 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
             import pyproj
             from shapely.ops import transform as shp_transform
             from shapely.geometry import Point
-            aeqd = pyproj.CRS.from_proj4(f"+proj=aeqd +lat_0={lat0} +lon_0={lon0} +datum=WGS84 +units=m +no_defs")
-            to_local = pyproj.Transformer.from_crs("EPSG:4326", aeqd, always_xy=True).transform
+            aeqd = pyproj.CRS.from_proj4(
+                f"+proj=aeqd +lat_0={lat0} +lon_0={lon0} +datum=WGS84 +units=m +no_defs"
+            )
+            to_local = pyproj.Transformer.from_crs(
+                "EPSG:4326", aeqd, always_xy=True
+            ).transform
             g_local = shp_transform(to_local, sel["geometry"])
             p_local = shp_transform(to_local, Point(lon0, lat0))
             return p_local.distance(g_local)
 
     if osm_result.get("success") and osm_result.get("selected"):
         sel = osm_result["selected"]
-        # 1) 若 footprint 包含中心，直接接受（不看距离）
+        # Rule 1: if footprint contains the query point, always accept (ignore distance)
         if sel.get("contains_query", False):
-            pass  # keep
+            pass
         else:
+            # Rule 2: if distance > 1.2 × AOI, discard OSM
             dist_m = _distance_m_safe(sel, config.lon, config.lat)
-            thr = float(config.aoi_radius_m) * 1.2  # 放宽到 1.2×AOI
+            thr = float(config.aoi_radius_m) * 1.2
             if dist_m > thr:
                 if config.verbose:
                     print(f"⚠ OSM building {dist_m:.1f} m away > 1.2×AOI ({thr:.1f} m), discard.")
                 osm_result = {"success": False, "selected": None, "error": "too_far"}
 
-
-    # 重投影 + 构建绘图几何（用与 DEM 一致的 CRS）
+    # Reproject building footprint to raster CRS (DEM CRS)
     from shapely.geometry import Point
     from shapely.ops import transform as shp_transform
     import pyproj
 
-    dst_crs = (meta_user.get("crs") if 'meta_user' in locals() else None) or meta_500.get("crs")
+    dst_crs = (meta_user.get("crs") if "meta_user" in locals() else None) or meta_500.get("crs")
     cx_dst, cy_dst = _lonlat_to_crs(config.lon, config.lat, dst_crs)
     center_pt = Point(cx_dst, cy_dst)
 
     if osm_result.get("success") and osm_result.get("selected"):
-        to_raster = pyproj.Transformer.from_crs("EPSG:4326", dst_crs, always_xy=True).transform
+        to_raster = pyproj.Transformer.from_crs(
+            "EPSG:4326", dst_crs, always_xy=True
+        ).transform
         osm_poly = shp_transform(to_raster, osm_result["selected"]["geometry"])
         house_area_raster = osm_poly
     else:
+        # Fallback: simple circular footprint around the query point
         osm_poly = None
         house_area_raster = center_pt.buffer(config.house_buffer_m, resolution=64)
 
-    pad_ring_raster = house_area_raster.buffer(config.pad_outer_m, resolution=96).difference(house_area_raster.buffer(config.pad_inner_m, resolution=96))
-    bands_raster = [house_area_raster.buffer(rmax, resolution=96).difference(
-                      house_area_raster.buffer(rmin, resolution=96))
-                    for (rmin, rmax) in config.ring_bands_m]
-    pooled_raster = house_area_raster.buffer(config.pooled_outer_max, resolution=96).difference(
-                      house_area_raster.buffer(config.pooled_outer_min, resolution=96))
+    # Build ring polygons in raster CRS
+    pad_ring_raster = house_area_raster.buffer(
+        config.pad_outer_m, resolution=96
+    ).difference(house_area_raster.buffer(config.pad_inner_m, resolution=96))
+
+    bands_raster = [
+        house_area_raster.buffer(rmax, resolution=96).difference(
+            house_area_raster.buffer(rmin, resolution=96)
+        )
+        for (rmin, rmax) in config.ring_bands_m
+    ]
+
+    pooled_raster = house_area_raster.buffer(
+        config.pooled_outer_max, resolution=96
+    ).difference(
+        house_area_raster.buffer(config.pooled_outer_min, resolution=96)
+    )
     
     # ===== STEP 5: Compute Terrain Derivatives =====
     if config.verbose:
@@ -787,24 +430,25 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
         print("STEP 5: COMPUTING TERRAIN DERIVATIVES")
         print("=" * 90)
     
+    # Derivatives for 500m DEM
     deriv = derive_slope_aspect_curvature(
         dem_arr,
-        res_x=config.dem_resolution_m,
-        res_y=config.dem_resolution_m,
+        res_x=1.0,
+        res_y=1.0,
     )
-    slope_500 = deriv['slope']
-    aspect_500 = deriv['aspect']
-    curv_500 = deriv['curvature']   
-    user_dem_resolution = user_dem_result["resolution_m"]
+    slope_500 = deriv["slope"]
+    aspect_500 = deriv["aspect"]
+    curv_500 = deriv["curvature"]   
 
+    # Derivatives for user AOI DEM
     deriv_user = derive_slope_aspect_curvature(
         dem_user["arr"],
-        res_x=user_dem_resolution,
-        res_y=user_dem_resolution,
+        res_x=1.0,
+        res_y=1.0,
     )
-    slope_user = deriv_user['slope']
-    aspect_user = deriv_user['aspect']
-    curv_user = deriv_user['curvature']
+    slope_user = deriv_user["slope"]
+    aspect_user = deriv_user["aspect"]
+    curv_user = deriv_user["curvature"]
 
     if config.verbose:
         print("✓ Computed slope, aspect, curvature")
@@ -815,6 +459,7 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
         print("STEP 6: ESTIMATING HOUSE ELEVATION")
         print("=" * 90)
     
+    # Convert lon/lat to Web Mercator coordinates for plane fitting logic
     cx3857, cy3857 = _lonlat_to_3857(config.lon, config.lat)
     
     with rasterio.open(user_dem_path) as src:
@@ -835,7 +480,6 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
             fallback_sample_size=config.fallback_sample_size,
         )
 
-    
     if config.verbose:
         print(f"House elevation: {house_ground:.2f} m (method: {house_info.get('method', 'N/A')})")
 
@@ -854,7 +498,6 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
         base_gentle=config.slope_mod_threshold,
     )
 
-    
     if config.verbose:
         print("✓ Terrain classified")
     
@@ -866,29 +509,30 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
 
     house_rc = house_rc_from_lonlat(meta, config.lon, config.lat)
 
-    # 左图星标：用 meta_user["crs"] 转 lon/lat
+    # Star marker for user DEM (using meta_user CRS)
     x_user, y_user = _lonlat_to_crs(config.lon, config.lat, meta_user.get("crs"))
 
-    # 右图星标：用 meta_500["crs"] 转 lon/lat
-    x_ref, y_ref   = _lonlat_to_crs(config.lon, config.lat, meta_500.get("crs"))    
+    # Star marker for 500m DEM (using meta_500 CRS)
+    x_ref, y_ref = _lonlat_to_crs(config.lon, config.lat, meta_500.get("crs"))
+
     # Figure 1: Elevation
     try:
         figure1_elevation(
-            out_tif_user=user_dem_path,                 # 1. 用户DEM路径
-            dem_500=dem_500["arr"],                      # 2. 500m参考DEM数组
-            circle_mask_500=mask_500,                    # 3. 500m参考DEM的掩码（修正）
-            xs_flat_500=meta_500["xs"].ravel(),          # 4. 500m参考DEM的x坐标（修正）
-            ys_flat_500=meta_500["ys"].ravel(),          # 5. 500m参考DEM的y坐标（修正）
-            cx3857_user=x_user,                          # 6. 用户中心x
-            cy3857_user=y_user,                          # 7. 用户中心y
-            cx3857_500=x_ref,                            # 8. 500m参考中心x
-            cy3857_500=y_ref,                            # 9. 500m参考中心y
-            aoi_radius_user=config.aoi_radius_m,         # 10. 用户半径
+            out_tif_user=user_dem_path,
+            dem_500=dem_500["arr"],
+            circle_mask_500=mask_500,
+            xs_flat_500=meta_500["xs"].ravel(),
+            ys_flat_500=meta_500["ys"].ravel(),
+            cx3857_user=x_user,
+            cy3857_user=y_user,
+            cx3857_500=x_ref,
+            cy3857_500=y_ref,
+            aoi_radius_user=config.aoi_radius_m,
             house_area_raster=house_area_raster,
             pad_ring_raster=pad_ring_raster,
             bands_raster=bands_raster,
             pooled_raster=pooled_raster,
-            center_elev=house_ground,                    # 对应center_elev
+            center_elev=house_ground,
             pooled_outer_min=config.pooled_outer_min,
             pooled_outer_max=config.pooled_outer_max,
             ring_bands_m=config.ring_bands_m,
@@ -967,50 +611,52 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
         if config.verbose:
             print(f"✗ figure4_terrain_and_hist: {e}")
     
-    # Figure 5 & 6: 3D - 使用DSM进行3D可视化
-    # Figure 5 & 6: 3D - Top = DEM (DTM), Bottom = Satellite/DSM
+    # Figure 5 & 6: 3D Visualizations (DEM + rings)
     if config.save_3d:
         try:
-            # 1) 取用户半径 与 500m 参考的 DTM/DSM 两套路径
+            # 1) Determine which DEM paths to use for user AOI and 500m reference
             if config.dem_for_user_aoi and config.aoi_radius_m != config.reference_radius_m:
                 user_key = f"dem_{int(config.aoi_radius_m)}m"
             else:
                 user_key = "dem_500m"
 
-            user_dtm_path = dem_results[user_key]["dtm_path"]   # ← DEM/DTM（上排要用这个）
-            user_dsm_path = dem_results[user_key]["dsm_path"]   # ← DSM（下排 NAIP 贴这个；没有也可传 None）
+            user_dtm_path = dem_results[user_key].get(
+                "tif_path", dem_results[user_key].get("dtm_path")
+            )
+            ref_dtm_path = dem_results["dem_500m"].get(
+                "tif_path", dem_results["dem_500m"].get("dtm_path")
+            )
 
-            ref_dtm_path  = dem_results["dem_500m"]["dtm_path"] # ← DEM/DTM（上排右图）
-            ref_dsm_path  = dem_results["dem_500m"]["dsm_path"] # ← DSM（下排右图）
-
-            # 防御性打印（跑一次就能肉眼确认传参是否正确）
+            # Helpful debugging output to confirm DEM selection
             if config.verbose:
                 print("[3D] DEM user:", os.path.basename(user_dtm_path))
                 print("[3D] DEM 500m:", os.path.basename(ref_dtm_path))
-                print("[3D] DSM user:", os.path.basename(user_dsm_path))
-                print("[3D] DSM 500m:", os.path.basename(ref_dsm_path))
 
-            # 如果 OSM 不可用，兜底 footprint/rings（保持你原逻辑）
+            # If OSM is unavailable, keep default circular footprint and ring structure
             if osm_poly is None and config.verbose:
-                print("  ⚠ OSM未找到建筑，使用默认圆形 footprint 并保持环带差集")
+                print("  ⚠ OSM did not find the building. Use the default circular footprint and keep the ring difference set.")
                 house_area_raster = center_pt.buffer(config.house_buffer_m, resolution=64)
 
-            pad_ring_raster = house_area_raster.buffer(config.pad_outer_m, resolution=96)\
-                            .difference(house_area_raster.buffer(config.pad_inner_m, resolution=96))
+            pad_ring_raster = house_area_raster.buffer(
+                config.pad_outer_m, resolution=96
+            ).difference(house_area_raster.buffer(config.pad_inner_m, resolution=96))
 
-            bands_raster = [house_area_raster.buffer(rmax, resolution=96)
-                            .difference(house_area_raster.buffer(rmin, resolution=96))
-                            for (rmin, rmax) in config.ring_bands_m]
+            bands_raster = [
+                house_area_raster.buffer(rmax, resolution=96).difference(
+                    house_area_raster.buffer(rmin, resolution=96)
+                )
+                for (rmin, rmax) in config.ring_bands_m
+            ]
 
-            pooled_raster = house_area_raster.buffer(config.pooled_outer_max, resolution=96)\
-                            .difference(house_area_raster.buffer(config.pooled_outer_min, resolution=96))
+            pooled_raster = house_area_raster.buffer(
+                config.pooled_outer_max, resolution=96
+            ).difference(
+                house_area_raster.buffer(config.pooled_outer_min, resolution=96)
+            )
 
-            # 2) 关键：上排传 DTM 到 dem_path_*，下排传 DSM 到 dsm_path_*
-            fig5_user, fig6_user, fig5_ref, fig6_ref = add_3d_figures_to_pipeline(
-                dem_path_user=user_dtm_path,               # ✅ 上排用 DEM/DTM
-                dem_path_500=ref_dtm_path,                 # ✅ 上排用 DEM/DTM
-                dsm_path_user=user_dsm_path,               # ✅ 下排 Satellite/DSM（可为 None）
-                dsm_path_500=ref_dsm_path,                 # ✅ 下排 Satellite/DSM（可为 None）
+            _ = add_3d_figures_to_pipeline(
+                dem_path_user=user_dtm_path,
+                dem_path_500=ref_dtm_path,
                 aoi_radius_user=config.aoi_radius_m,
                 house_ground_med=house_ground,
                 house_area_raster=house_area_raster,
@@ -1026,7 +672,7 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
 
             combo_path = os.path.join(config.outdir, "figure5_6_3d_combo.html")
             if os.path.exists(combo_path) and config.verbose:
-                print(f"  ✅ 3D组合图已生成：{combo_path}")
+                print(f"  ✅ 3D visualization generated：{combo_path}")
             if config.verbose:
                 print("✓ figure5_6_3d_combo.html")
 
@@ -1034,7 +680,39 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
             if config.verbose:
                 print(f"✗ 3D visualizations: {e}")
 
-    
+    # ===== STEP 8.5: Global Composite Terrain Risk (building-level over 500m) =====
+    if config.verbose:
+        print("\n" + "=" * 90)
+        print("STEP 8.5: GLOBAL COMPOSITE TERRAIN RISK (building-level over 500m)")
+        print("=" * 90)
+
+    # Make building polygon globally available for risk function
+    set_risk_building_poly(house_area_raster)
+
+    # Compute median elevation for the 500m region (used by risk function)
+    area_median_elev_500m = float(
+        np.nanmedian(dem_arr[mask_500 & np.isfinite(dem_arr)])
+    )
+
+    global_map_path = os.path.join(config.outdir, "figure_terrain_risk_map.png")
+    global_risk_info = compute_global_composite_risk_map(
+        dem_arr_500=dem_500["arr"],
+        slope_500=slope_500,
+        aspect_500=aspect_500,
+        meta_500=meta_500,
+        lat=float(config.lat),
+        lon=float(config.lon),
+        gamma=float(config.global_gamma),
+        res_window_m=float(config.global_res_window_m),
+        weights=config.global_weights,
+        out_png_path=global_map_path,
+        house_ground=float(house_ground),
+        area_median_elev=area_median_elev_500m,
+    )
+
+    if config.verbose:
+        print(f"✓ figure_terrain_risk_map.png")
+
     # ===== STEP 9: Ring Metrics =====
     if config.verbose:
         print("\n" + "=" * 90)
@@ -1060,25 +738,29 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
         
         if m:
             ring_rows.append({
-                'Radius (m)': r,
-                'Pixels': m['n_pixels'],
-                'ΔElev_median (m)': round(m['delta_median'], 3),   # 恢复原列名
-                '% Higher': round(m['pct_higher'], 1),
-                '% Lower': round(m['pct_lower'], 1),
-                'Slope_mean (°)': round(m['slope_mean'], 2),
-                'Slope_median (°)': round(m['slope_median'], 2),
-                'Slope_P25 (°)': round(m['slope_p25'], 2),
-                'Slope_P75 (°)': round(m['slope_p75'], 2),
-                '% Flat <2°': round(m['pct_flat'], 1),
-                '% Gentle 2–5°': round(m['pct_gentle'], 1),
-                '% Steep ≥5°': round(m['pct_steep'], 1),
-                'Convergence (%)': round(m['convergence_%'], 1),
-                'Dominant Aspect (°)': round(m['dominant_aspect'], 1) if np.isfinite(m['dominant_aspect']) else np.nan,
-                'Dominant Aspect (cardinal)': cardinal_direction(m['dominant_aspect']),
+                "Radius (m)": r,
+                "Pixels": m["n_pixels"],
+                "ΔElev_median (m)": round(m["delta_median"], 3),
+                "Slope_mean (°)": round(m["slope_mean"], 2),
+                "Slope_median (°)": round(m["slope_median"], 2),
+                "Slope_P25 (°)": round(m["slope_p25"], 2),
+                "Slope_P75 (°)": round(m["slope_p75"], 2),
+                "% Flat <2°": round(m["pct_flat"], 1),
+                "% Gentle 2–5°": round(m["pct_gentle"], 1),
+                "% Steep ≥5°": round(m["pct_steep"], 1),
+                "Convergence (%)": round(m["convergence_%"], 1),
+                "Dominant Aspect (°)": (
+                    round(m["dominant_aspect"], 1)
+                    if np.isfinite(m["dominant_aspect"])
+                    else np.nan
+                ),
+                "Dominant Aspect (cardinal)": cardinal_direction(m["dominant_aspect"]),
             })
     
     summary_df = pd.DataFrame(ring_rows).reset_index(drop=True)
+    # Attach 10m ring mask for narrative/utilities (stored in attrs, not as a column)
     summary_df.attrs["ring_mask_10m"] = ring_masks_all.get(10.0, None)
+
     if config.verbose:
         print(f"Computed metrics for {len(ring_rows)} radii")
     
@@ -1088,7 +770,16 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
         print("STEP 10: AREA STATISTICS")
         print("=" * 90)
 
-    def _compute_area_stats(dem_arr: np.ndarray, mask: np.ndarray, house_ground: float, label: str) -> Tuple[pd.DataFrame, float]:
+    def _compute_area_stats(
+        dem_arr: np.ndarray,
+        mask: np.ndarray,
+        house_ground: float,
+        label: str
+    ) -> Tuple[pd.DataFrame, float]:
+        """
+        Compute basic elevation statistics for an area mask and house elevation.
+        Returns a DataFrame (for export) and percentile rank for the house.
+        """
         valid = mask & np.isfinite(dem_arr)
         elevs = dem_arr[valid]
 
@@ -1101,42 +792,70 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
             min_elev = max_elev = med_elev = pr = np.nan
 
         df = pd.DataFrame({
-            'Metric': [
-                'House Elevation',
-                f'Lowest Elevation in {label}',
-                f'Highest Elevation in {label}',
-                f'Median Elevation in {label}',
-                f'Elevation Percentile Rank in {label}',
+            "Metric": [
+                "House Elevation",
+                f"Lowest Elevation in {label}",
+                f"Highest Elevation in {label}",
+                f"Median Elevation in {label}",
+                f"Elevation Percentile Rank in {label}",
             ],
-            'Value': [
+            "Value": [
                 f"{house_ground:.2f} m",
                 f"{min_elev:.2f} m" if np.isfinite(min_elev) else "NaN",
                 f"{max_elev:.2f} m" if np.isfinite(max_elev) else "NaN",
                 f"{med_elev:.2f} m" if np.isfinite(med_elev) else "NaN",
                 f"{pr:.2f}%" if np.isfinite(pr) else "NaN",
             ],
-            'Interpretation': [
-                'Reference elevation',
-                f"{(house_ground - min_elev):.2f} m above lowest" if np.isfinite(min_elev) else "NaN",
-                f"{(max_elev - house_ground):.2f} m below highest" if np.isfinite(max_elev) else "NaN",
-                f"{'Above' if house_ground > med_elev else 'Below'} median" if np.isfinite(med_elev) else "NaN",
-                "Above regional median" if np.isfinite(pr) and pr > 50 else ("Below regional median" if np.isfinite(pr) else "NaN"),
-            ]
+            "Interpretation": [
+                "Reference elevation",
+                (
+                    f"{(house_ground - min_elev):.2f} m above lowest"
+                    if np.isfinite(min_elev)
+                    else "NaN"
+                ),
+                (
+                    f"{(max_elev - house_ground):.2f} m below highest"
+                    if np.isfinite(max_elev)
+                    else "NaN"
+                ),
+                (
+                    "Above median"
+                    if np.isfinite(med_elev) and house_ground > med_elev
+                    else ("Below median" if np.isfinite(med_elev) else "NaN")
+                ),
+                (
+                    "Above regional median"
+                    if np.isfinite(pr) and pr > 50
+                    else ("Below regional median" if np.isfinite(pr) else "NaN")
+                ),
+            ],
         })
         return df, float(pr) if np.isfinite(pr) else np.nan
 
-    # 计算两份：500m 固定 + 用户 AOI
-    label_user = f"{int(config.aoi_radius_m)}m" if float(config.aoi_radius_m).is_integer() else f"{config.aoi_radius_m}m"
-    area_df_500m, pr_500m   = _compute_area_stats(dem_arr, mask_500,     house_ground, "500m")
-    area_df_user, pr_user_aoi = _compute_area_stats(dem_arr, mask_user_aoi, house_ground, label_user)
+    # Compute area stats for both: 500m fixed and user AOI
+    label_user = (
+        f"{int(config.aoi_radius_m)}m"
+        if float(config.aoi_radius_m).is_integer()
+        else f"{config.aoi_radius_m}m"
+    )
+    area_df_500m, pr_500m = _compute_area_stats(
+        dem_arr, mask_500, house_ground, "500m"
+    )
+    area_df_user, pr_user_aoi = _compute_area_stats(
+        dem_arr, mask_user_aoi, house_ground, label_user
+    )
 
-    # 延续既有语义：
-    # - percentile_rank（旧字段）= 用户 AOI
-    # - 另外新增 percentile_rank_500m 方便区分
+    # Keep backward-compatible meaning:
+    # - percentile_rank (old field) = user AOI percentile
+    # - percentile_rank_500m = separate 500m percentile
     pr = pr_user_aoi
+
+    def _fmt_pct(x):
+        return f"{x:.1f}%" if np.isfinite(x) else "NaN"
+
     if config.verbose:
-        print(f"House percentile (user AOI {label_user}): {pr_user_aoi:.1f}%")
-        print(f"House percentile (500m): {pr_500m:.1f}%")
+        print(f"House percentile (user AOI {label_user}): {_fmt_pct(pr_user_aoi)}")
+        print(f"House percentile (500m): {_fmt_pct(pr_500m)}")
 
     
     # ===== STEP 11: Save Outputs =====
@@ -1146,71 +865,72 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
         print("=" * 90)
     
     try:
-        # Determine formats
+        # Determine which formats to save
         formats_to_save = []
         if config.output_format == "parquet":
             formats_to_save = ["parquet"]
         elif config.output_format == "csv":
             formats_to_save = ["csv"]
-        else:  # both
+        else:  # 'both'
             formats_to_save = ["parquet", "csv"]
         
-        # Filter available formats
+        # Filter formats based on available dependencies
         available_formats = []
         for fmt in formats_to_save:
             if fmt == "parquet":
                 try:
-                    import pyarrow
+                    import pyarrow  # noqa: F401
                     available_formats.append("parquet")
                     if config.verbose:
-                        print(f"  Supported format: parquet (pyarrow available)")
+                        print("  Supported format: parquet (pyarrow available)")
                 except ImportError:
                     if config.verbose:
-                        print(f"  ❌ Parquet not supported (pyarrow missing), fallback to csv")
+                        print("  ❌ Parquet not supported (pyarrow missing), fallback to csv")
             else:
                 available_formats.append("csv")
                 if config.verbose:
-                    print(f"  Supported format: csv")
+                    print("  Supported format: csv")
         
         if not available_formats:
             available_formats = ["csv"]
             if config.verbose:
-                print(f"  Default format: csv")
+                print("  Default format: csv")
         
-        # Save tables
+        # Save table outputs
         saved_tables = {}
-        table_base_dir = os.path.basename(config.outdir)  # 子目录名（如26p409538_-81p784861_500m）
+        table_base_dir = os.path.basename(config.outdir)  # e.g. run_id subdir
         
-        # 保存summary_multiscale表格
+        # Save multi-scale summary
         if config.verbose:
-            print(f"  Saving summary_multiscale table...")
+            print("  Saving summary_multiscale table...")
         summary_multiscale_paths = save_table(
             summary_df,
             os.path.join(config.outdir, "summary_multiscale"),
             available_formats
         )
-        # 转换为相对路径（前端需要）
+        # Convert to relative paths (for frontend)
         for fmt, abs_path in summary_multiscale_paths.items():
             rel_path = os.path.join(table_base_dir, fmt)
             saved_tables[f"summary_multiscale.{fmt.split('.')[-1]}"] = rel_path
             if config.verbose:
                 print(f"    ✅ {fmt}: {abs_path}")
         
-        # 转换为相对路径（前端需要）
+        # Save area-level stats (500m)
         if config.verbose:
-            print(f"  Saving summary_area_level (two versions)...")
+            print("  Saving summary_area_level (two versions)...")
         area_500_base = os.path.join(config.outdir, "summary_area_level")
         area_500_paths = save_table(area_df_500m, area_500_base, available_formats)
         for fname, abs_path in area_500_paths.items():
-            rel_path = os.path.join(table_base_dir, fname)   # e.g. summary_area_level.csv
+            rel_path = os.path.join(table_base_dir, fname)
             saved_tables[f"summary_area_level.{fname.split('.')[-1]}"] = rel_path
             if config.verbose:
                 print(f"    ✅ {fname} (500m default): {abs_path}")
         
+        # Save area-level stats (user AOI)
         area_user_base = os.path.join(config.outdir, "summary_area_level_user")
         area_user_paths = save_table(area_df_user, area_user_base, available_formats)
         for fname, abs_path in area_user_paths.items():
-            rel_path = os.path.join(table_base_dir, fname)   # e.g. summary_area_level_user.csv
+            rel_path = os.path.join(table_base_dir, fname)
             saved_tables[f"summary_area_level_user.{fname.split('.')[-1]}"] = rel_path
             if config.verbose:
                 print(f"    ✅ {fname} (user AOI {label_user}): {abs_path}")
@@ -1218,13 +938,12 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
         if config.verbose:
             print(f"  Saved {len(saved_tables)} tables total")
         
-        # Save narrative
+        # Save narrative text (if enabled)
         narrative_abs_path = os.path.join(config.outdir, "narrative.txt")
-        narrative_rel_path = os.path.join(table_base_dir, "narrative.txt")  # 相对路径
+        narrative_rel_path = os.path.join(table_base_dir, "narrative.txt")
         if config.generate_narrative:
             if config.verbose:
-                print(f"  Saving narrative...")
-
+                print("  Saving narrative...")
             try:
                 narrative_text = generate_narrative(
                     summary_df=summary_df,
@@ -1232,6 +951,10 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
                     slope=slope_500,
                     aspect=aspect_500,
                     house_rc=house_rc,
+                    global_risk=global_risk_info,
+                    house_elev_m=house_ground,
+                    area_percentiles={"user": pr_user_aoi, "ref_500m": pr_500m},
+                    area_labels={"user": f"{int(config.aoi_radius_m)}m", "ref_500m": "500m"},
                 )
                 with open(narrative_abs_path, "w", encoding="utf-8") as f:
                     f.write(narrative_text.strip() + "\n")
@@ -1240,86 +963,111 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
             except Exception as e:
                 if config.verbose:
                     print(f"    ⚠ narrative generation failed, writing empty placeholder: {e}")
+                # If narrative fails, write an empty file so frontend shows a placeholder
                 with open(narrative_abs_path, "w", encoding="utf-8") as f:
-                    f.write("")  # 出错时写空，前端会显示 '-- EMPTY NARRATIVE --'
+                    f.write("")
         else:
             narrative_rel_path = ""
             if config.verbose:
-                print(f"  Skipping narrative (generate_narrative=False)")
+                print("  Skipping narrative (generate_narrative=False)")
         
-        # ===== STEP 12: Generate Manifest (关键修复) =====
+        # ===== STEP 12: Generate Manifest =====
         if config.verbose:
-            print(f"  Generating manifest.json...")
+            print("  Generating manifest.json...")
         
-        # 1. 确定manifest保存路径：run_id根目录（outputs/{run_id}/manifest.json）
-        run_root_dir = config.outdir 
-        # 确保run_root_dir存在（容错）
+        # 1. Manifest should be saved at run root directory (outputs/{run_id}/manifest.json)
+        run_root_dir = config.outdir
         os.makedirs(run_root_dir, exist_ok=True)
         manifest_path = os.path.join(run_root_dir, "manifest.json")
         if config.verbose:
             print(f"    Manifest path: {manifest_path}")
         
+        # Relative figure paths (for frontend routing)
         figs_rel_paths = {
             "figure1_elevation": os.path.join(table_base_dir, "figure1_elevation.png"),
             "figure2_slope": os.path.join(table_base_dir, "figure2_slope.png"),
             "figure3_aspect": os.path.join(table_base_dir, "figure3_aspect.png"),
             "figure4_terrain_and_hist": os.path.join(table_base_dir, "figure4_terrain_and_hist.png"),
-            "figure5_6_3d_combo": os.path.join(table_base_dir, "figure5_6_3d_combo.html")
+            "figure5_6_3d_combo": os.path.join(table_base_dir, "figure5_6_3d_combo.html"),
+            "figure_terrain_risk_map": os.path.join(table_base_dir, "figure_terrain_risk_map.png"),
         }
-        # 表格文件（从saved_tables中提取）
+
+        # Table files from saved_tables
         table_rel_paths = list(saved_tables.values())
-        # 叙事文件
-        narrative_files = [narrative_rel_path] if config.generate_narrative and os.path.exists(narrative_abs_path) else []
+
+        # Narrative file
+        narrative_files = (
+            [narrative_rel_path]
+            if config.generate_narrative and os.path.exists(narrative_abs_path)
+            else []
+        )
         
-        # 2.4 新增：收集DTM/DSM路径（核心修复）
+        # Collect DEM file names as relative paths
         dem_files = []
         for dem_key, dem_info in dem_results.items():
-    # 提取DTM文件名，构建相对路径（与其他文件保持一致的目录结构）
-            dtm_filename = os.path.basename(dem_info["dtm_path"])
-            dtm_rel_path = os.path.join(table_base_dir, dtm_filename)
-            dem_files.append(dtm_rel_path)
+            dtm_filename = os.path.basename(
+                dem_info.get("tif_path", dem_info.get("dtm_path", ""))
+            )
+            if dtm_filename:
+                dtm_rel_path = os.path.join(table_base_dir, dtm_filename)
+                dem_files.append(dtm_rel_path)
     
-    # 提取DSM文件名，构建相对路径
-            dsm_filename = os.path.basename(dem_info["dsm_path"])
-            dsm_rel_path = os.path.join(table_base_dir, dsm_filename)
-            dem_files.append(dsm_rel_path)
-        # 合并所有文件到files字段（去重+过滤空路径）
-        all_files = list(set(list(figs_rel_paths.values()) + table_rel_paths + narrative_files + dem_files))
+        # Aggregate all files and filter empties
+        all_files = list(
+            set(list(figs_rel_paths.values()) + table_rel_paths + narrative_files + dem_files)
+        )
         all_files = [f for f in all_files if f.strip()]
         
+        # Only keep entries that actually exist on disk
         existing_files = []
         for rel in all_files:
-            abs_path = os.path.join(config.output_dir, rel.split('/', 1)[-1]) if rel.startswith(os.path.basename(config.outdir)) else os.path.join(config.output_dir, rel)
+            if rel.startswith(os.path.basename(config.outdir)):
+                # Strip run_id prefix to construct absolute path correctly
+                abs_path = os.path.join(config.output_dir, rel.split("/", 1)[-1])
+            else:
+                abs_path = os.path.join(config.output_dir, rel)
             if os.path.exists(abs_path):
                 existing_files.append(rel)
         all_files = existing_files
         
-        # 3. 构建完整manifest（匹配前端预期字段）
+        # Build manifest dict expected by the frontend
         manifest = {
-            "run_id": table_base_dir,  # 补充run_id字段
+            "run_id": table_base_dir,
             "dataset": config.dataset_name,
             "lat": float(config.lat),
             "lon": float(config.lon),
             "aoi_radius_m": float(config.aoi_radius_m),
             "house_ground_m": float(house_ground),
-            "percentile_rank": float(pr) if np.isfinite(pr) else None, 
+            "percentile_rank": float(pr) if np.isfinite(pr) else None,
             "percentile_rank_500m": float(pr_500m) if np.isfinite(pr_500m) else None,
+            "terrain_risk_score": (
+                float(global_risk_info.get("target_risk"))
+                if isinstance(global_risk_info, dict)
+                and global_risk_info.get("target_risk") is not None
+                else None
+            ),
+            "terrain_risk_percentile": (
+                float(global_risk_info.get("global_percentile"))
+                if isinstance(global_risk_info, dict)
+                and global_risk_info.get("global_percentile") is not None
+                else None
+            ),
             "address": config.address,
-            "tables": saved_tables,  # 相对路径的表格
-            "figs": figs_rel_paths,  # 修正key+相对路径的图片
-            "files": all_files  # 补充前端需要的files数组
+            "tables": saved_tables,
+            "figs": figs_rel_paths,
+            "files": all_files,
         }
         
-        # 4. 保存manifest到run_id根目录（添加异常捕获）
+        # Save manifest.json at run root directory
         try:
             with open(manifest_path, "w") as f:
                 json.dump(manifest, f, indent=2)
             if config.verbose:
-                print(f"    ✅ manifest.json saved successfully")
+                print("    ✅ manifest.json saved successfully")
                 print(f"    Manifest contains {len(all_files)} output files")
         except Exception as manifest_err:
             print(f"    ❌ Failed to save manifest: {str(manifest_err)}")
-            raise  # 抛出异常，让用户看到
+            raise
         
         if config.verbose:
             print("\n" + "=" * 90)
@@ -1330,10 +1078,13 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
             print(f"Manifest path: {manifest_path}")
         
     except Exception as e:
-        # 捕获所有异常，打印详细信息
+        # Global catch for output errors, with a simplified traceback hint
         print(f"\n    ❌ ERROR IN SAVING OUTPUTS: {str(e)}")
-        print(f"    Traceback (simplified): {e.__traceback__.tb_frame.f_code.co_filename}:{e.__traceback__.tb_lineno}")
-        raise  # 重新抛出，确保用户看到错误
+        print(
+            f"    Traceback (simplified): "
+            f"{e.__traceback__.tb_frame.f_code.co_filename}:{e.__traceback__.tb_lineno}"
+        )
+        raise
 
     return {
         "outputs_dir": config.outdir,
@@ -1345,7 +1096,17 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
         "summary_multiscale": summary_df,
         "summary_area_level": area_df_500m,
         "summary_area_level_500m": area_df_500m,
-        "summary_area_level_user": area_df_user, 
+        "summary_area_level_user": area_df_user,
+        "terrain_risk_score": (
+            float(global_risk_info.get("target_risk"))
+            if isinstance(global_risk_info, dict)
+            else None
+        ),
+        "terrain_risk_percentile": (
+            float(global_risk_info.get("global_percentile"))
+            if isinstance(global_risk_info, dict)
+            else None
+        ),
     }
 
 
@@ -1357,20 +1118,20 @@ if __name__ == "__main__":
     # Create default config
     config = PipelineConfig()
     
-    # Override with user input (example)
+    # Example override with manual inputs
     config.lat = 41.8781
     config.lon = -87.6298
-    config.aoi_radius_m = 500.0  # User-selectable!
+    config.aoi_radius_m = 500.0        # User-selectable radius
     config.dem_for_user_aoi = True
-    config.output_format = "both"
+    config.output_format = "both"      # Save both CSV and Parquet if possible
     config.generate_narrative = True
     config.save_3d = True
     
     # Run pipeline
     results = run_pipeline(config)
     
-    # Print summary
-    print(f"\n[SUMMARY]")
+    # Print short summary
+    print("\n[SUMMARY]")
     print(f"House elevation: {results['house_ground_m']:.2f} m")
     print(f"Percentile rank: {results['percentile_rank']:.1f}%")
     print(f"Output dir: {results['outputs_dir']}")

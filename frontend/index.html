@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tokio Marine · Elevation Risk Analysis</title>
+  <meta name="description" content="Professional elevation risk analysis platform for property assessment using LiDAR data and terrain modeling">
+  <meta name="author" content="Tokio Marine">
+  
+  <!-- External Dependencies -->
+  <!-- Leaflet Map -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin></script>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- Font Awesome Icons -->
+  <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+  
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js"></script>
+  
+  <!-- GSAP Animation Library -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/ScrollTrigger.min.js"></script>
+  
+  <!-- Tailwind Configuration -->
+  <script src="js/tailwind-config.js"></script>
+  
+  <!-- Custom Styles -->
+  <link rel="stylesheet" href="css/utilities.css">
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+
+<body class="text-text-primary">
+  <!-- Loading Screen -->
+  <div id="loadingScreen" class="loading-container">
+    <img src="https://p3-flow-imagex-sign.byteimg.com/tos-cn-i-a9rns2rl98/rc/pc/super_tool/d38edc6cec624e65ac6ca9dab6f83457~tplv-a9rns2rl98-image.image?rcl=20251026081942C839851031E36B4F3A68&rk3s=8e244e95&rrcfp=f06b921b&x-expires=1764030014&x-signature=Z2Rcz9SgrSLxN3bgFQXsZ5lHCjk%3D" 
+         alt="Tokio Marine Elevation Risk Analysis Platform" 
+         class="loading-logo">
+    <div class="loading-text">Loading Risk Analysis System...</div>
+    <div class="loading-bar-container">
+      <div class="loading-bar"></div>
+    </div>
+  </div>
+
+  <!-- Main Application Container -->
+  <div class="container">
+    <!-- Header Section -->
+    <header class="header">
+      <div class="w-full flex justify-center mb-4">
+        <img src="https://p3-flow-imagex-sign.byteimg.com/tos-cn-i-a9rns2rl98/rc/pc/super_tool/d38edc6cec624e65ac6ca9dab6f83457~tplv-a9rns2rl98-image.image?rcl=20251026081942C839851031E36B4F3A68&rk3s=8e244e95&rrcfp=f06b921b&x-expires=1764030014&x-signature=Z2Rcz9SgrSLxN3bgFQXsZ5lHCjk%3D" 
+             alt="Tokio Marine" 
+             class="tokio-logo">
+      </div>
+      <div id="systemStatus" class="system-status warn mx-auto">
+        <span class="status-icon warn"></span>
+        <span class="status-text warn">SYSTEM CHECK</span>
+      </div>
+    </header>
+
+    <!-- Control Panel -->
+    <section class="panel glass-effect" id="mainPanel">
+      <div class="controls">
+        <!-- Address Input -->
+        <div class="field">
+          <label for="addr" class="field-label">ADDRESS</label>
+          <input id="addr" type="text" placeholder="Enter address" class="input-field">
+        </div>
+        
+        <!-- Coordinates -->
+        <div class="field small">
+          <label for="lat" class="field-label">LATITUDE</label>
+          <input id="lat" type="number" step="0.000001" class="input-field">
+        </div>
+        <div class="field small">
+          <label for="lon" class="field-label">LONGITUDE</label>
+          <input id="lon" type="number" step="0.000001" class="input-field">
+        </div>
+        
+        <!-- Analysis Options -->
+        <div class="field small">
+          <label for="radius" class="field-label">ANALYSIS RADIUS</label>
+          <select id="radius" class="select-field">
+            <option value="50">50m</option>
+            <option value="100" selected>100m</option>
+            <option value="200">200m</option>
+            <option value="300">300m</option>
+          </select>
+        </div>
+        
+        <!-- Action Button -->
+        <div class="field small">
+          <label class="field-label">&nbsp;</label>
+          <button id="runBtn" class="btn btn-primary" disabled>
+            <i class="fa fa-play-circle"></i>
+            ANALYZE
+          </button>
+        </div>
+        
+        <!-- Run ID Display -->
+        <div class="field">
+          <label for="rid" class="field-label">RUN IDENTIFIER</label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input id="rid" value="-- -- -- --" readonly class="input-field mono scroll-x">
+            <button id="copyRid" type="button" class="btn btn-secondary" title="Copy RUN ID">
+              <i class="fa fa-clipboard"></i> COPY
+            </button>
+          </div>
+        </div>
+      </div>
+    
+      <!-- Status Display -->
+      <div class="status">
+        <div>STATUS: <span id="status">STANDBY</span></div>
+        <div id="statusBadge" class="badge warn">IDLE</div>
+        <div id="hint">AWAITING INPUT</div>
+      </div>
+    
+      <!-- Progress Bar -->
+      <div class="progress-container">
+        <div class="progress-bar progress-bar-glow" id="progressBar"></div>
+      </div>
+    </section>
+
+    <!-- Results Layout -->
+    <div class="layout">
+      <!-- Key Metrics Section -->
+      <section class="card glass-card section-full">
+        <div class="card-header">
+          <h3><i class="fa fa-tachometer"></i> KEY METRICS</h3>
+        </div>
+        <div class="metrics">
+          <div class="metric-card">
+            <div class="metric-value" id="mLocation">--</div>
+            <div class="metric-label">ADDRESS</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-value" id="mGround">--.--</div>
+            <div class="metric-label">GROUND ELEV (m)</div>
+          </div>
+          <div class="metric-card wide" id="percentDeltaCard">
+            <div class="metric-value metric-delta" id="mPercentDelta">--</div>
+            <div class="metric-label">ELEVATION PERCENTILE RANK & ΔELEVATION</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Satellite Map Section -->
+      <section class="card glass-card section-full" id="satCard">
+        <div class="card-header">
+          <h3 class="flex items-center justify-between gap-2">
+            <span class="flex items-center gap-2">
+              <i class="fa fa-globe"></i> SATELLITE IMAGE
+            </span>
+            <span class="text-xs text-gray-400 opacity-70">
+              Red = User Selected Radius; Yellow = 500 m
+            </span>
+          </h3>
+        </div>
+        <div id="satMap" class="map-container"></div>
+      </section>
+
+      <!-- 2D Terrain Analysis Section -->
+      <section class="card glass-card section-full">
+        <div class="card-header">
+          <h3 class="flex items-center justify-between gap-2">
+            <span class="flex items-center gap-2">
+              <i class="fa fa-area-chart"></i> TERRAIN ANALYSIS (2D)
+            </span>
+            <span class="text-xs text-gray-400 opacity-70">
+              DEM · bare-earth elevation (buildings & trees removed)
+            </span>
+          </h3>
+        </div>
+        <div class="gallery">
+          <div class="figure" onclick="UI.openImage(this.querySelector('img'))">
+            <img id="fig1" alt="Figure 1: Elevation" />
+            <div class="cap">Figure 1: Elevation Map</div>
+          </div>
+          <div class="figure" onclick="UI.openImage(this.querySelector('img'))">
+            <img id="fig2" alt="Figure 2: Slope" />
+            <div class="cap">Figure 2: Slope Analysis</div>
+          </div>
+          <div class="figure" onclick="UI.openImage(this.querySelector('img'))">
+            <img id="fig3" alt="Figure 3: Aspect" />
+            <div class="cap">Figure 3: Aspect Map</div>
+          </div>
+          <div class="figure" onclick="UI.openImage(this.querySelector('img'))">
+            <img id="fig4" alt="Figure 4: Terrain Classification" />
+            <div class="cap">Figure 4: Terrain Classification & Histogram</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 3D Visualization Section -->
+      <section class="card glass-card section-full">
+        <div class="card-header">
+          <h3 class="flex items-center justify-between gap-2">
+            <span class="flex items-center gap-2">
+              <i class="fa fa-cube"></i> 3D VISUALIZATION (Interactive)
+            </span>
+          </h3>
+        </div>
+        <div class="gallery">
+          <div class="figure-3d">
+            <button class="btn btn-secondary fs-btn" onclick="UI.open3DFullscreen()">
+              <i class="fa fa-expand"></i> FULLSCREEN
+            </button>
+            <iframe id="fig3d" title="3D Terrain Visualization"></iframe>
+          </div>
+        </div>
+      </section>
+
+      <!-- Area Elevation Snapshots Section -->
+      <section class="card glass-card section-full">
+        <div class="card-header">
+          <h3><i class="fa fa-camera"></i> AREA ELEVATION SNAPSHOTS</h3>
+        </div>
+        <div class="snapshots">
+          <div class="snapshot-card">
+            <h4 class="snapshot-header">
+              <i class="fa fa-map-marker"></i> <span id="userAOIRadius">--</span> m AOI
+            </h4>
+            <div class="snapshot-grid" id="snapUser"></div>
+          </div>
+          <div class="snapshot-card">
+            <h4 class="snapshot-header">
+              <i class="fa fa-map-marker"></i> 500 m AOI
+            </h4>
+            <div class="snapshot-grid" id="snap500"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Multiscale Analysis Table Section -->
+      <section class="card glass-card section-full">
+        <div class="card-header">
+          <h3><i class="fa fa-table"></i> SUMMARY: MULTISCALE RING ANALYSIS</h3>
+        </div>
+        <div class="table-container scrollbar-thin">
+          <table id="tblSummary">
+            <thead class="table-header">
+              <tr>
+                <th>Summary Multiscale</th>
+              </tr>
+            </thead>
+            <tbody class="table-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Analysis Narrative Section -->
+      <section class="card glass-card section-full">
+        <div class="card-header">
+          <h3 class="flex items-center justify-between gap-2">
+            <span class="flex items-center gap-2">
+              <i class="fa fa-file-text"></i> ANALYSIS NARRATIVE
+            </span>
+          </h3>
+        </div>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 items-stretch">
+          <div class="flex flex-col">
+            <div id="narrative" class="narrative-container flex-1">-- AWAITING ANALYSIS --</div>
+          </div>
+          <div class="flex flex-col">
+            <div class="figure-container large" onclick="UI.openImage(this.querySelector('img'))" title="Open preview">
+              <img id="figRiskMap" alt="Figure: Terrain Risk Map" style="width:100%;height:100%;object-fit:contain;" />
+              <div class="figure-caption">Terrain Risk Map</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Output Files Section -->
+      <section class="card glass-card section-full">
+        <div class="card-header">
+          <h3><i class="fa fa-download"></i> OUTPUT FILES</h3>
+        </div>
+        <div id="fileList" class="file-list"></div>
+      </section>
+    </div>
+  </div>
+
+  <!-- Modal for Image Preview -->
+  <div id="modal" class="modal" aria-hidden="true">
+    <div class="modal-content" role="dialog" aria-modal="true" aria-label="Image preview">
+      <div class="modal-close" onclick="UI.closeModal()">✕</div>
+      <img id="modalImg" src="" alt="" />
+    </div>
+  </div>
+  
+  <!-- Notification System -->
+  <div class="notification" id="notification">
+    <div class="notification-icon" id="notificationIcon"></div>
+    <div class="notification-text" id="notificationText"></div>
+  </div>
+
+  <!-- JavaScript Modules -->
+  <script src="js/api.js"></script>
+  <script src="js/map.js"></script>
+  <script src="js/ui.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>

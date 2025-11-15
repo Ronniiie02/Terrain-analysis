@@ -4,10 +4,9 @@ DEM generation & loading (aligned with final pipeline)
 -------------------------------------------------------
 - discover_usgs_lidar_dataset: Matches dataset using USGS LIDAR boundary resources
 - build_dem_for_radius: Generates DEM for a specified radius using PDAL EPT
-  (SMRF/Outlier/Range parameters aligned with final script)
 - load_dem: Loads DEM into an array and returns metadata
 - build_circle_mask: Creates a circular AOI mask on the DEM grid centered at given lat/lon
-- build_all_circle_masks: Build masks for multiple radii (50, 100, 120, 200, 300, 500m)
+- build_all_circle_masks: Build masks for multiple radii (50, 100, 200, 300, 500m)
 """
 
 from __future__ import annotations
@@ -17,37 +16,16 @@ import json
 import requests
 import numpy as np
 import rasterio
-from rasterio.transform import xy as tfm_xy
-import pyproj
 import pdal
 import geopandas as gpd
 from shapely.geometry import Point
-from shapely.ops import transform as shp_transform
+from .helpers import _lonlat_to_3857
 
 from .config import (
     DEM_RES_DEFAULT,
     PDAL_THREADS,
     NODATA_SENTINEL,
 )
-
-# ===========================
-# Helpers (local + aligned with final script)
-# ===========================
-
-def _lonlat_to_3857(lon: float, lat: float) -> Tuple[float, float]:
-    """Converts WGS84 (lon,lat) to EPSG:3857 (x,y)."""
-    t = pyproj.Transformer.from_crs(
-        "EPSG:4326", "EPSG:3857", always_xy=True
-    ).transform
-    return t(lon, lat)
-
-
-def safe_ll_for_filename(lat: float, lon: float) -> Tuple[str, str]:
-    """Converts lat/lon to filename-safe strings (replaces '.' with 'p')."""
-    safe_lat = f"{lat:.6f}".replace('.', 'p')
-    safe_lon = f"{lon:.6f}".replace('.', 'p')
-    return safe_lat, safe_lon
-
 
 # ===========================
 # Dataset Discovery
@@ -171,7 +149,7 @@ def build_dem_for_radius(
                 "type": "filters.outlier",
                 "method": "statistical",
                 "mean_k": 8,
-                "multiplier": 2.5
+                "multiplier": 3
             },
             {
                 "type": "filters.range",
@@ -193,7 +171,6 @@ def build_dem_for_radius(
     count = pdal.Pipeline(json.dumps(pipeline_spec)).execute()
     return int(count)
 
-
 # ===========================
 # DEM Management
 # ===========================
@@ -203,19 +180,18 @@ def ensure_dem(
     dataset_name: str,
     lat: float,
     lon: float,
-    out_tif_path: str,          # 任意路径,没有"120m"/"500m"
-    radius_m: float,             # 任意半径: 50, 100, 120, 200, 300, 500...
+    out_tif_path: str,      
+    radius_m: float,           
     resolution_m: float = 1.0,
     nodata: float = -9999.0,
     threads: int = 8,
 ) -> Dict[str, Any]:
-    """生成或重用单个DEM - 支持任意半径"""
     if not os.path.exists(out_tif_path):
         build_dem_for_radius(
             dataset_name=dataset_name,
             lat=lat,
             lon=lon,
-            radius_m=radius_m,      # ✅ 动态半径
+            radius_m=radius_m,  
             resolution_m=resolution_m,
             out_tif=out_tif_path,
             threads=threads,
@@ -225,23 +201,21 @@ def ensure_dem(
     return {
         "dataset": dataset_name,
         "tif_path": out_tif_path,
-        "radius_m": radius_m,      # ✅ 记录实际使用的半径
+        "radius_m": radius_m,      
         "resolution_m": resolution_m,
         "nodata": nodata,
     }
 
 
-# ✅ CONVENIENCE FUNCTION (便利函数):
 def build_multiple_dems(
     dataset_name: str,
     lat: float,
     lon: float,
-    dem_specs: Dict[str, Dict[str, float]],  # 字典定义所有DEM规格
+    dem_specs: Dict[str, Dict[str, float]],  
     nodata: float = -9999.0,
     threads: int = 8,
 ) -> Dict[str, Dict[str, Any]]:
     """
-    生成多个DEM - 完全通用!
     
     Example in pipeline:
         dem_specs = {
@@ -260,7 +234,7 @@ def build_multiple_dems(
             lat=lat,
             lon=lon,
             out_tif_path=spec["out_path"],
-            radius_m=spec["radius_m"],              # ✅ 任意半径
+            radius_m=spec["radius_m"],          
             resolution_m=spec.get("resolution_m", 1.0),
             nodata=nodata,
             threads=threads,

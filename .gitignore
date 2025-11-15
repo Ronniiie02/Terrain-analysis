@@ -23,3 +23,13 @@ outputs/
 src/dem_cache/
 frontend-react/node_modules/
 frontend-react/dist/
+
+# macOS junk
+.DS_Store
+
+# Local config / secrets
+.env
+
+# Generated outputs / logs
+outputs/
+uvicorn.log

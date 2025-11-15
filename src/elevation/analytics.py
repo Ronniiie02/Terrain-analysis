@@ -1,9 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 Analytics module
-----------------
-Mirrors FINAL pipeline STEP 9 & 10:
-- Unified ring metrics (reusing terrain.compute_ring_metrics_unified)
 - Build multiscale summary DataFrame
 - Generate narrative (reusing terrain.generate_narrative)
 - Area-level statistics (min/max/median/percentile rank)

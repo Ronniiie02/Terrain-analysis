@@ -1,34 +1,24 @@
 # -*- coding: utf-8 -*-
 """
 INTEGRATED VISUALIZATION MODULE - Complete VIZ Pipeline
-- All Figure 1-6 functions in ONE file
-- Fully parametrized (NO hardcodes)
-- Matches final model logic 1:1
-- 2D visualizations (Elevation/Slope/Aspect/Terrain) + 3D (Elevation/Satellite)
+- 2D visualizations (Elevation/Slope/Aspect/Terrain) + 3D Elevation
 """
 
 from __future__ import annotations
 from typing import Dict, Any, Tuple, Optional, List
 import numpy as np
 import os
-import json
-import tempfile
-import requests
 import rioxarray as rio
 import matplotlib.pyplot as plt
-import scipy.ndimage as ndi
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from matplotlib.colors import ListedColormap, TwoSlopeNorm
 import rasterio
-from rasterio.warp import reproject, transform as rio_transform
-from rasterio.enums import Resampling as RioResampling
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from shapely.geometry import Point, Polygon, MultiPolygon, LinearRing
 import plotly.io as pio
 import pyproj
-import hashlib
 import math
 import warnings
 from shapely.geometry import LinearRing
@@ -36,12 +26,6 @@ import shapely
 
 warnings.filterwarnings("ignore", category=UserWarning, module="rasterio")
 pio.renderers.default = "browser"
-
-
-
-# ============================================
-# CONFIGURATION - All parameters centralized
-# ============================================
 
 DEFAULT_CONFIG = {
     # ===== Figure 1: Elevation Map =====
@@ -89,12 +73,9 @@ DEFAULT_CONFIG = {
     "fig5_6_max_rings_to_draw": 3,
     "fig5_6_dem_max_size_user": 360,
     "fig5_6_dem_max_size_ref": 420,
-    "fig5_6_naip_size_user": "1024,1024",
-    "fig5_6_naip_size_ref": "1024,1024",
     "fig5_6_densify_px": 2.0,
     "fig5_6_simplify_k": 1.5,
     "fig5_6_elevation_colorscale": "RdBu_r",
-    "fig5_6_naip_fetch_enabled": True,
     "fig5_6_poly_colors": {
         "footprint": "#FFD700",
         "edge": "#00E5FF", 
@@ -107,14 +88,7 @@ DEFAULT_CONFIG = {
         "bands": 2,
         "pooled": 3,
     },
-    "fig5_6_mesh_lighting": {
-        "ambient": 0.75,
-        "diffuse": 0.9,
-        "specular": 0.05,
-        "roughness": 0.95,
-    },
 }
-
 
 # ============================================
 # HELPER FUNCTIONS
@@ -137,21 +111,6 @@ def _draw_poly(ax, poly, lw: float = 2.0, color: str = 'k', ls: str = '-'):
         except Exception:
             continue
 
-
-def _lonlat_to_3857(lon: float, lat: float) -> Tuple[float, float]:
-    """Convert WGS84 to Web Mercator"""
-    t = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True).transform
-    return t(lon, lat)
-
-
-# ============================================
-# 3D VISUALIZATION FUNCTIONS (从第一段txt完全复制)
-# ============================================
-
-def _stable_tmp_name(prefix, key, suffix=".tif"):
-    h = hashlib.md5(key.encode("utf-8")).hexdigest()[:12]
-    return os.path.join(tempfile.gettempdir(), f"{prefix}_{h}{suffix}")
-
 def _read_dem_as_grid(dem_tif, max_size=800):
     with rasterio.open(dem_tif) as src:
         z = src.read(1).astype(float)
@@ -173,94 +132,8 @@ def _read_dem_as_grid(dem_tif, max_size=800):
             np.array(ys).reshape(len(rows), len(cols)),
             z_ds,
             src.crs,
-            max(src.res)  # 像素大小（用于简化阈值）
+            max(src.res)  
         )
-
-def _reproject_match(src_path, dst_ref_path, resampling=RioResampling.bilinear):
-    with rasterio.open(dst_ref_path) as ref, rasterio.open(src_path) as src:
-        src_crs = src.crs or rasterio.crs.CRS.from_epsg(4326)
-        profile = ref.profile.copy()
-        profile.update(
-            count=src.count,
-            dtype=src.dtypes[0],
-            transform=ref.transform,
-            width=ref.width,
-            height=ref.height,
-            crs=ref.crs,
-        )
-        profile.pop("nodata", None)
-        tmp = tempfile.NamedTemporaryFile(suffix=".tif", delete=False).name
-        with rasterio.open(tmp, "w", **profile) as dst:
-            for i in range(1, src.count + 1):
-                reproject(
-                    source=rasterio.band(src, i),
-                    destination=rasterio.band(dst, i),
-                    src_transform=src.transform,
-                    src_crs=src_crs,
-                    dst_transform=ref.transform,
-                    dst_crs=ref.crs,
-                    resampling= resampling,
-                )
-    return tmp
-
-def _fetch_naip_bbox_like_dem(dem_tif, size_str="1024,1024"):
-    # 以 DEM bounds 作为 cache key，避免重复下载/重投影
-    with rasterio.open(dem_tif) as ref:
-        (minx, miny, maxx, maxy) = ref.bounds
-        lons, lats = rio_transform(ref.crs, "EPSG:4326", [minx, maxx], [miny, maxy])
-        bbox = f"{min(lons)},{min(lats)},{max(lons)},{max(lats)}"
-        cache_key = f"naip_bbox={bbox}|dst_crs={ref.crs.to_string()}|size={size_str}"
-    cache_path = _stable_tmp_name("naip_cache", cache_key)
-
-    if os.path.exists(cache_path):
-        return cache_path  # 已缓存
-
-    url = "https://imagery.nationalmap.gov/arcgis/rest/services/USGSNAIPPlus/ImageServer/exportImage"
-    params = dict(
-        bbox=bbox, bboxSR=4326, imageSR=4326,
-        size=size_str, format="tiff", pixelType="U8", f="json",
-        mosaicRule='{"mosaicMethod":"NorthWest"}'
-    )
-    r = requests.get(url, params=params, timeout=25)  # 缩短超时
-    r.raise_for_status()
-    href = r.json().get("href")
-    if not href:
-        raise RuntimeError("NAIP: 无 href 返回")
-    raw = requests.get(href, timeout=45)  # 缩短超时
-    raw.raise_for_status()
-    tmp = tempfile.NamedTemporaryFile(suffix=".tif", delete=False).name
-    with open(tmp, "wb") as f:
-        f.write(raw.content)
-    out = _reproject_match(tmp, dem_tif, resampling=RioResampling.bilinear)
-    # 写入缓存
-    try:
-        os.replace(out, cache_path)
-        return cache_path
-    except Exception:
-        return out  # 缓存失败也返回可用文件
-
-def _grid_to_mesh(xs, ys, z):
-    nr, nc = z.shape
-    xv, yv, zv = xs.ravel(), ys.ravel(), z.ravel()
-    def idx(r, c): return r * nc + c
-    I, J, K = [], [], []
-    for r in range(nr - 1):
-        for c in range(nc - 1):
-            a = idx(r, c); b = idx(r, c + 1); d = idx(r + 1, c); e = idx(r + 1, c + 1)
-            I += [a, a]; J += [b, e]; K += [e, d]
-    return xv, yv, zv, np.array(I), np.array(J), np.array(K), nr, nc
-
-def _resample_rgb_to_grid(imagery_tif, nr, nc):
-    with rasterio.open(imagery_tif) as img_src:
-        img = img_src.read()  # (C,H,W)
-        if img.shape[0] >= 3:
-            rgb = np.stack([img[0], img[1], img[2]], axis=-1)
-        else:
-            rgb = np.stack([img[0]] * 3, axis=-1)
-        from scipy.ndimage import zoom
-        fy, fx = nr / rgb.shape[0], nc / rgb.shape[1]
-        rgb_rs = zoom(rgb, (fy, fx, 1), order=1)
-        return np.clip(rgb_rs, 0, 255).astype(np.uint8)
 
 def _robust_minmax(arrays, q=(2,98)):
             vals = []
@@ -279,15 +152,6 @@ def _robust_minmax(arrays, q=(2,98)):
                 lo -= 0.1; hi += 0.1
             return float(lo), float(hi)
 
-def _vertexcolor_from_rgb_grid(rgb_grid):
-    return (rgb_grid.reshape(-1, 3).astype(np.float32) / 255.0)
-
-def _align_center_units(center_m, z_array):
-    zf = z_array[np.isfinite(z_array)]
-    if zf.size == 0:
-        return float(center_m)
-    z_med = float(np.nanmedian(zf))
-    return float(center_m) * 3.28084 if z_med > 80 else float(center_m)
 
 def _reproj_geom(geom, src_crs, dst_crs):
     if (geom is None) or geom.is_empty:
@@ -317,10 +181,6 @@ def _simplify_for_speed(poly, pixel_size, simplify_k):
 
 def add_polygon_outline(fig, polygon, dem_tif, color="#FF00FF", lw=3, poly_crs="EPSG:3857",
                         densify_px=2.0, z_offset=1.5, fallback_z=None, simplify_k=1.5, speed_mode=True):
-    """
-    完全仿照第三份代码的实现
-    向Plotly 3D图中添加多边形轮廓线
-    """
     if (polygon is None) or polygon.is_empty:
         return
     with rasterio.open(dem_tif) as src:
@@ -371,53 +231,6 @@ def add_polygon_outline(fig, polygon, dem_tif, color="#FF00FF", lw=3, poly_crs="
                 line=dict(color=color, width=int(lw)),
                 showlegend=False
             ))
-
-
-def _render_elevation_3d(dem_tif, title="", center=None, show_scale=True, max_size=800, colorscale="RdBu_r"):
-    xs, ys, z, _, _ = _read_dem_as_grid(dem_tif, max_size=max_size)
-    zf = z[np.isfinite(z)]
-    if zf.size == 0:
-        zmin, zmax, zmid = 0.0, 1.0, 0.5
-    else:
-        zmin, zmax = float(np.nanmin(zf)), float(np.nanmax(zf))
-        zmid = float(np.nanmedian(zf)) if center is None else float(center)
-    surf = go.Surface(
-        x=xs, y=ys, z=z,
-        surfacecolor=z,
-        colorscale=colorscale,
-        cmin=zmin, cmax=zmax, cmid=zmid,
-        showscale=bool(show_scale),
-        colorbar=dict(title="Elevation (m)") if show_scale else None
-    )
-    fig = go.Figure(surf)
-    fig.update_layout(
-        title=title, scene_aspectmode="data",
-        margin=dict(l=0, r=0, t=40, b=0),
-        showlegend=False
-    )
-    return fig
-
-def _render_satellite_3d(dem_tif, title="", max_size=800, naip_size="1024,1024"):
-    xs, ys, z, _, _ = _read_dem_as_grid(dem_tif, max_size=max_size)
-    xv, yv, zv, I, J, K, nr, nc = _grid_to_mesh(xs, ys, z)
-    naip_like = _fetch_naip_bbox_like_dem(dem_tif, size_str=naip_size)
-    rgb_grid = _resample_rgb_to_grid(naip_like, nr, nc)
-    vertexcolor = _vertexcolor_from_rgb_grid(rgb_grid)
-    mesh = go.Mesh3d(
-        x=xv, y=yv, z=zv,
-        i=I, j=J, k=K,
-        vertexcolor=vertexcolor,
-        showscale=False,
-        lighting=dict(ambient=0.75, diffuse=0.9, specular=0.05, roughness=0.95),
-    )
-    fig = go.Figure(mesh)
-    fig.update_layout(
-        title=title, scene_aspectmode="data",
-        margin=dict(l=0, r=0, t=40, b=0),
-        showlegend=False
-    )
-    return fig
-
 
 # ============================================
 # FIGURE 1: ELEVATION MAP (2-panel comparison)
@@ -781,8 +594,8 @@ def figure4_terrain_and_hist(
 # ============================================
 
 def add_3d_figures_to_pipeline(
-    dem_path_user: str,            # ← 这里传 DEM/DTM（用户半径）
-    dem_path_500: str,             # ← 这里传 DEM/DTM（500m 参考）
+    dem_path_user: str,           
+    dem_path_500: str,           
     house_area_raster,
     pad_ring_raster,
     bands_raster: list,
@@ -794,29 +607,20 @@ def add_3d_figures_to_pipeline(
     outdir=None,
     config=None,
     verbose=True,
-    # === 新增两个可选参数（若不提供，则下排用 DEM 代替 DSM 网格渲染） ===
-    dsm_path_user: str = None,
-    dsm_path_500: str = None,
 ):
     """
-    目标布局（2x2）：
-      (1,1) Elevation DEM - user
-      (1,2) Elevation DEM - 500m
-      (2,1) Satellite DSM - user
-      (2,2) Satellite DSM - 500m
+    3D Visualization
     """
     try:
-        # 读取配置
         SPEED_MODE = config.get("fig5_6_speed_mode", True) if config else True
         MAX_RINGS_TO_DRAW = config.get("fig5_6_max_rings_to_draw", 3) if config else 3
         MAX_SIZE_USER = config.get("fig5_6_dem_max_size_user", 360) if config else 360
         MAX_SIZE_REF  = config.get("fig5_6_dem_max_size_ref", 420) if config else 420
-        NAIP_SIZE_USER = config.get("fig5_6_naip_size_user", "1024,1024") if config else "1024,1024"
-        NAIP_SIZE_REF  = config.get("fig5_6_naip_size_ref", "1024,1024") if config else "1024,1024"
         DENSIFY_PX = config.get("fig5_6_densify_px", 2.0) if config else 2.0
         SIMPLIFY_K = config.get("fig5_6_simplify_k", 1.5) if config else 1.5
         COLOR_SEQ = (config or {}).get("fig5_6_elevation_colorscale", "RdBu_r")
 
+        # Polygon color/linewidth config
         poly_colors = config.get("fig5_6_poly_colors", {}) if config else {}
         COL_FOOT = poly_colors.get("footprint", "#FFD700")
         COL_EDGE = poly_colors.get("edge", "#00E5FF")
@@ -827,7 +631,7 @@ def add_3d_figures_to_pipeline(
         else:
             LW_FOOT, LW_EDGE, LW_BAND, LW_POOL = (6, 5, 3, 4)
 
-        # ========== 颜色范围仅基于 DEM 计算 ==========
+        # ---- Load DEM arrays for range normalization ----
         with rasterio.open(dem_path_user) as su:
             zu = su.read(1).astype(float)
             if su.nodata is not None:
@@ -836,18 +640,13 @@ def add_3d_figures_to_pipeline(
             z5 = s5.read(1).astype(float)
             if s5.nodata is not None:
                 z5[z5 == s5.nodata] = np.nan
+
         q_low, q_high = (config or {}).get("fig5_6_quantiles", (2, 98))
         CMIN, CMAX = _robust_minmax([zu, z5], (q_low, q_high))
 
-        # ========== 上排：Elevation DEM（彩色高程面） ==========
-        def _render_dem_surface(dem_tif, title, max_size, center_array):
+        # ---- Draw DEM surface ----
+        def _render_dem_surface(dem_tif, title, max_size):
             xs, ys, z, _, _ = _read_dem_as_grid(dem_tif, max_size=max_size)
-            zf = z[np.isfinite(z)]
-            if zf.size == 0:
-                zmin, zmax, zmid = 0.0, 1.0, 0.5
-            else:
-                zmin, zmax = float(np.nanmin(zf)), float(np.nanmax(zf))
-                zmid = _align_center_units(house_ground_med, center_array)
             surf = go.Surface(
                 x=xs, y=ys, z=z,
                 surfacecolor=z,
@@ -856,163 +655,76 @@ def add_3d_figures_to_pipeline(
                 showscale=True, colorbar=dict(title="Elevation (m)")
             )
             fig = go.Figure(surf)
-            fig.update_layout(title=title, scene_aspectmode="data",
-                              margin=dict(l=0, r=0, t=40, b=0), showlegend=False)
+            fig.update_layout(
+                title=title, scene_aspectmode="data",
+                margin=dict(l=0, r=0, t=40, b=0), showlegend=False
+            )
             return fig
 
-        fig_dem_user = _render_dem_surface(
-            dem_path_user, f"Elevation DEM - {aoi_radius_user:g}m", MAX_SIZE_USER, zu
-        )
-        fig_dem_500 = _render_dem_surface(
-            dem_path_500, "Elevation DEM - 500m", MAX_SIZE_REF, z5
-        )
+        fig_user = _render_dem_surface(dem_path_user, f"Elevation DEM - {aoi_radius_user:g}m", MAX_SIZE_USER)
+        fig_ref  = _render_dem_surface(dem_path_500, "Elevation DEM - 500m", MAX_SIZE_REF)
 
-        # ========== 下排：Satellite DSM（NAIP 贴图到 DSM 网格；无 DSM 时用 DEM 占位） ==========
-        def _render_satellite_mesh(geo_tif, title, max_size, naip_size):
-            xs, ys, z, _, _ = _read_dem_as_grid(geo_tif, max_size=max_size)
-            xv, yv, zv, I, J, K, nr, nc = _grid_to_mesh(xs, ys, z)
-            naip_like = _fetch_naip_bbox_like_dem(geo_tif, size_str=naip_size)
-            rgb_grid = _resample_rgb_to_grid(naip_like, nr, nc)
-            mesh = go.Mesh3d(
-                x=xv, y=yv, z=zv,
-                i=I, j=J, k=K,
-                vertexcolor=_vertexcolor_from_rgb_grid(rgb_grid),
-                showscale=False,
-                lighting=dict(ambient=0.75, diffuse=0.9, specular=0.05, roughness=0.95),
-            )
-            fig = go.Figure(mesh)
-            fig.update_layout(title=title, scene_aspectmode="data",
-                              margin=dict(l=0, r=0, t=40, b=0), showlegend=False)
-            return fig
-
-        tif_user_sat = dsm_path_user or dem_path_user
-        tif_ref_sat  = dsm_path_500 or dem_path_500
-
-        # user satellite
-        try:
-            fig_sat_user = _render_satellite_mesh(
-                tif_user_sat, f"Satellite DSM - {aoi_radius_user:g}m", MAX_SIZE_USER, NAIP_SIZE_USER
-            )
-        except Exception as e:
-            if verbose:
-                print(f"⚠ NAIP(user) 失败 -> Elevation DEM 备用: {e}")
-            fig_sat_user = _render_dem_surface(
-                dem_path_user, f"Elevation DEM (fallback) - {aoi_radius_user:g}m", MAX_SIZE_USER, zu
-            )
-
-        # ref satellite
-        try:
-            fig_sat_500 = _render_satellite_mesh(
-                tif_ref_sat, "Satellite DSM - 500m", MAX_SIZE_REF, NAIP_SIZE_REF
-            )
-        except Exception as e:
-            if verbose:
-                print(f"⚠ NAIP(500m) 失败 -> Elevation DEM 备用: {e}")
-            fig_sat_500 = _render_dem_surface(
-                dem_path_500, "Elevation DEM (fallback) - 500m", MAX_SIZE_REF, z5
-            )
-
-        # ========== 组合 2x2 ==========
+        # ---- Combine left/right ----
         combo = make_subplots(
-            rows=2, cols=2,
-            specs=[[{"type": "scene"}, {"type": "scene"}],
-                   [{"type": "scene"}, {"type": "scene"}]],
-            vertical_spacing=0.05, horizontal_spacing=0.05,
-            subplot_titles=(
-                f"Elevation DEM - {aoi_radius_user:g}m",
-                "Elevation DEM - 500m",
-                f"Satellite DSM - {aoi_radius_user:g}m",
-                "Satellite DSM - 500m",
-            ),
+            rows=1, cols=2,
+            specs=[[{"type": "scene"}, {"type": "scene"}]],
+            subplot_titles=(f"Elevation DEM - {aoi_radius_user:g}m", "Elevation DEM - 500m"),
         )
-        for tr in fig_dem_user.data: combo.add_trace(tr, row=1, col=1)
-        for tr in fig_dem_500.data:  combo.add_trace(tr, row=1, col=2)
-        for tr in fig_sat_user.data: combo.add_trace(tr, row=2, col=1)
-        for tr in fig_sat_500.data:  combo.add_trace(tr, row=2, col=2)
+        for tr in fig_user.data: combo.add_trace(tr, row=1, col=1)
+        for tr in fig_ref.data:  combo.add_trace(tr, row=1, col=2)
 
-        # ========== 叠加多边形：上排在 DEM 上采样，下排在 DSM（或占位）上采样 ==========
-        def _overlay(fig_obj, poly, base_tif, color, lw, row, col, zfb):
+        # ---- Overlay polygons (footprint, rings, pooled) ----
+        def _overlay(fig_obj, poly, base_tif, color, lw, col_idx):
             tmp = go.Figure()
             add_polygon_outline(
-                tmp, poly, base_tif, color=color, lw=lw,
-                poly_crs=src_crs_user, densify_px=DENSIFY_PX,
+                tmp, poly, base_tif,
+                color=color, lw=lw,
+                poly_crs=src_crs_user,
+                densify_px=DENSIFY_PX,
                 z_offset=1.2 if SPEED_MODE else 1.5,
-                fallback_z=zfb, simplify_k=SIMPLIFY_K, speed_mode=SPEED_MODE
+                fallback_z=house_ground_med,
+                simplify_k=SIMPLIFY_K,
+                speed_mode=SPEED_MODE
             )
             for tr in tmp.data:
                 tr.showlegend = False
-                fig_obj.add_trace(tr, row=row, col=col)
+                fig_obj.add_trace(tr, row=1, col=col_idx)
 
-        # 上排：用 DEM 作为采样底图
-        for (r, c, tif) in [(1,1, dem_path_user), (1,2, dem_path_500)]:
-            _overlay(combo, house_area_raster, tif, COL_FOOT, LW_FOOT, r, c, house_ground_med)
-            _overlay(combo, pad_ring_raster,   tif, COL_EDGE, LW_EDGE, r, c, house_ground_med)
+        for (col_idx, tif) in [(1, dem_path_user), (2, dem_path_500)]:
+            _overlay(combo, house_area_raster, tif, COL_FOOT, LW_FOOT, col_idx)
+            _overlay(combo, pad_ring_raster,   tif, COL_EDGE, LW_EDGE, col_idx)
             rings_drawn = 0
             for rp, colr in zip(bands_raster, COL_BANDS):
                 if rp is None: continue
-                _overlay(combo, rp, tif, colr, LW_BAND, r, c, house_ground_med)
+                _overlay(combo, rp, tif, colr, LW_BAND, col_idx)
                 rings_drawn += 1
                 if rings_drawn >= MAX_RINGS_TO_DRAW: break
-            _overlay(combo, pooled_raster, tif, COL_POOL, LW_POOL, r, c, house_ground_med)
-
-        # 下排：用 DSM（若缺则用 DEM 占位）作为采样底图
-        for (r, c, tif) in [(2,1, tif_user_sat), (2,2, tif_ref_sat)]:
-            _overlay(combo, house_area_raster, tif, COL_FOOT, LW_FOOT, r, c, house_ground_med)
-            _overlay(combo, pad_ring_raster,   tif, COL_EDGE, LW_EDGE, r, c, house_ground_med)
-            rings_drawn = 0
-            for rp, colr in zip(bands_raster, COL_BANDS):
-                if rp is None: continue
-                _overlay(combo, rp, tif, colr, LW_BAND, r, c, house_ground_med)
-                rings_drawn += 1
-                if rings_drawn >= MAX_RINGS_TO_DRAW: break
-            _overlay(combo, pooled_raster, tif, COL_POOL, LW_POOL, r, c, house_ground_med)
-
-        # 统一色条：只保留右上（DEM-500m）
-        # 关闭全部 showscale，再打开右上一个
-        seen_surfaces = []
-        for tr in combo.data:
-            if hasattr(tr, "showscale"):
-                tr.showscale = False
-            if getattr(tr, "type", None) == "surface":
-                tr.update(colorscale=COLOR_SEQ, cmin=CMIN, cmax=CMAX)
-                seen_surfaces.append(tr)
-        if seen_surfaces:
-            # 第二个 surface 对应右上
-            tr = seen_surfaces[1] if len(seen_surfaces) > 1 else seen_surfaces[0]
-            tr.showscale = True
-            tr.colorbar = dict(title="Elevation (m)", x=1.02, xpad=12, len=0.86, thickness=16)
+            _overlay(combo, pooled_raster, tif, COL_POOL, LW_POOL, col_idx)
 
         combo.update_layout(
-            title=dict(text=f"3D Terrain Visualization · DEM & DSM",
+            title=dict(text="3D Terrain Visualization",
                        x=0.5, xanchor='center', font=dict(size=16)),
             scene =dict(aspectmode="data"),
             scene2=dict(aspectmode="data"),
-            scene3=dict(aspectmode="data"),
-            scene4=dict(aspectmode="data"),
-            margin=dict(l=0, r=70, t=80, b=0),
+            margin=dict(l=0, r=60, t=70, b=0),
             showlegend=False,
-            height=900 if SPEED_MODE else 1000
+            height=750 if SPEED_MODE else 900,
         )
 
-        # 写文件
-        if outdir is not None:
-            combo_path = os.path.join(outdir, "figure5_6_3d_combo.html")
-            combo.write_html(combo_path)
+        # ---- Save ----
+        if outdir:
+            out_path = os.path.join(outdir, "figure5_6_3d_combo.html")
+            combo.write_html(out_path)
             if verbose:
-                print("  ✓ Saved figure5_6_3d_combo.html")
+                print(f"✓ Saved {out_path}")
 
-        if verbose:
-            print("✔ 3D visualization complete (Top=DEM, Bottom=Satellite/DSM)")
+        return (fig_user, None, fig_ref, None)
 
-        return fig_dem_user, fig_sat_user, fig_dem_500, fig_sat_500
-
-    except ImportError as e:
-        print(f"⚠ Plotly not available for 3D visualization: {e}")
-        return None, None, None, None
     except Exception as e:
         print(f"⚠ 3D visualization failed: {e}")
         import traceback; traceback.print_exc()
         return None, None, None, None
+
 
 __all__ = [
     'DEFAULT_CONFIG',

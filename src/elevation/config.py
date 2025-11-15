@@ -2,10 +2,6 @@
 """
 Configuration module for elevation analysis pipeline
 ---------------------------------------------------
-Global defaults for DEM resolution, external services, and analysis parameters.
-NOTE: AOI radii (120, 500) are NOT hardcoded here - they are defined at runtime
-      in the main orchestration logic based on specific analysis needs.
-All values aligned with FINAL pipeline behavior.
 """
 
 import os
@@ -47,7 +43,7 @@ POOLED_OUTER_MAX: float = 25.0
 # ===========================
 # External Services
 # ===========================
-GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
+GOOGLE_API_KEY: str | None = os.getenv("GOOGLE_API_KEY")  
 COUNTRY_BIAS: str = os.getenv("COUNTRY_BIAS", "US")
 OVERPASS_UA: str = os.getenv(
     "OVERPASS_UA",

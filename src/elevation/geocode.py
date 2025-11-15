@@ -7,8 +7,8 @@ Geocoding helpers (robust)
 
 from __future__ import annotations
 from typing import Optional, Tuple
-import os
 import requests
+from .config import GOOGLE_API_KEY, COUNTRY_BIAS 
 
 __all__ = [
     "GOOGLE_API_KEY",
@@ -19,11 +19,8 @@ __all__ = [
     "resolve_location_from_user_input",
 ]
 
-# ❶ 仅环境变量，不要硬编码默认 key
-GOOGLE_API_KEY: Optional[str] = os.getenv("GOOGLE_API_KEY", "AIzaSyBV79lYlTdh2ev6jOOE6q-aZGVWdQVJv-8")
-GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
-COUNTRY_BIAS = "US" 
 
+GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
 UA = {"User-Agent": "terrain-risk/2.1 (contact: yao3@uchicago.edu)"}
 
 def _is_number(x) -> bool:
@@ -87,17 +84,15 @@ def nominatim_geocode(address: str, country_bias: Optional[str] = None):
         return None, None, None
 
 def resolve_location_from_user_input(user_text: str) -> Tuple[Optional[float], Optional[float], Optional[str]]:
-    """先解析 'lat,lon'，再试 Google（如有 KEY），最后 Nominatim 兜底。"""
+    """First, parse 'lat,lon', then try Google and finally use Nominatim as a fallback."""
     parsed = _parse_latlon_string(user_text)
     if parsed:
         return parsed[0], parsed[1], f"{parsed[0]:.6f}, {parsed[1]:.6f}"
 
-    # 先 Google（如果配置了 KEY）
     lat, lon, faddr = geocode_address(user_text, GOOGLE_API_KEY, country_bias=COUNTRY_BIAS)
     if lat is not None and lon is not None:
         return lat, lon, (faddr or user_text)
 
-    # 再 OSM 兜底
     lat, lon, faddr = nominatim_geocode(user_text, country_bias=COUNTRY_BIAS)
     if lat is not None and lon is not None:
         return lat, lon, (faddr or user_text)

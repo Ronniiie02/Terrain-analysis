@@ -4,17 +4,19 @@ import re
 from typing import Optional, Tuple
 from difflib import SequenceMatcher
 
-# ========== 工具 ==========
+# ========== Utilities ==========
 UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE
 )
 
 def slugify_address(address: str) -> str:
+    """Convert address to a safe, compact slug for directory naming."""
     s = re.sub(r"[^A-Za-z0-9]+", "_", address.strip())
     return re.sub(r"_+", "_", s).strip("_")[:80] or "address_unknown"
 
 def build_predicted_run_id(address: str, lat: float, lon: float, radius_m: float) -> str:
+    """Generate a predictable run_id using short address + radius."""
     short = short_address_for_dir(address)
     if short:
         slug = slugify_address(short)
@@ -25,25 +27,25 @@ def build_predicted_run_id(address: str, lat: float, lon: float, radius_m: float
     return f"{slug}_{radius_label}"
 
 def _parse_radius_from_runid(run_id: str) -> Optional[float]:
-    # 匹配 100m, 50m, 200m 等格式
+    """Extract radius (in meters) from run_id string (e.g., '_500m')."""
     m = re.search(r'_(\d+(?:\.\d+)?)m$', run_id, re.IGNORECASE)
     if m:
         return float(m.group(1))
     return None
 
 def validate_radius_match(req_radius: Optional[float], manifest_radius: Optional[float]) -> bool:
-    """验证半径是否匹配"""
+    """Check if two radii are effectively equal (within floating-point tolerance)."""
     if req_radius is None or manifest_radius is None:
-        return True  # 如果任一为None，不进行半径验证
+        return True  # Skip radius validation if either is missing
     
     return abs(float(req_radius) - float(manifest_radius)) < 1e-6
 
 
 def short_address_for_dir(address: str) -> str:
     """
-    仅用于目录命名的“短地址”：取第一个逗号前的片段。
-    例: "1610 Millstone Rd, Sag Harbor, NY 11963, USA" -> "1610 Millstone Rd"
-    输入为空时原样返回空字符串。
+    Extract short address for directory naming: take part before first comma.
+    Example: "1610 Millstone Rd, Sag Harbor, NY 11963, USA" -> "1610 Millstone Rd"
+    Returns empty string if input is empty.
     """
     if not address:
         return ""
@@ -51,10 +53,11 @@ def short_address_for_dir(address: str) -> str:
     return head or address.strip()
 
 def find_existing_run(outputs_root: str, run_id: str):
+    """Find existing run by exact slug+radius under UUID subdirectories."""
     root = Path(outputs_root)
     req_radius = _parse_radius_from_runid(run_id)
 
-    # 1) 精确：uuid/*/<slug_radius> 且有 manifest
+    # 1) Exact match: uuid/*/<slug_radius> with manifest
     for path in root.glob(f"*/{run_id}"):
         man = path / "manifest.json"
         if man.exists():
@@ -66,7 +69,7 @@ def find_existing_run(outputs_root: str, run_id: str):
             except Exception:
                 return str(path), str(man), path.parent.name
 
-    # 2) 兜底：目录名严格等于 run_id
+    # 2) Fallback: directory name exactly matches run_id
     for man in root.rglob("manifest.json"):
         try:
             if man.parent.name.lower() != run_id.lower():
@@ -81,6 +84,7 @@ def find_existing_run(outputs_root: str, run_id: str):
 
 
 def find_existing_run_by_prefix(outputs_root: str, short_slug_with_radius: str):
+    """Find run by prefix match on directory name (short address to full)."""
     root = Path(outputs_root)
     target = short_slug_with_radius.lower()
     for uuid_dir in root.iterdir():
@@ -99,19 +103,25 @@ def find_existing_run_by_prefix(outputs_root: str, short_slug_with_radius: str):
 def find_existing_run_smart(outputs_root: str, run_id: str,
                             lat: Optional[float], lon: Optional[float],
                             radius_m: Optional[float],
-                            coord_eps: float = 1.5e-3):   # 放宽到~167m
-    # 1) 严格 slug+radius 命中
+                            coord_eps: float = 1.5e-3):   # ~167m tolerance
+    """
+    Smart lookup with multiple fallback strategies:
+    1. Exact slug+radius
+    2. Prefix match
+    3. Coordinate proximity (with exact radius match)
+    """
+    # 1) Strict slug+radius hit
     hit = find_existing_run(outputs_root, run_id)
     if hit:
         outdir, manifest_path, uuid = hit
         return outdir, manifest_path, uuid, Path(outdir).name
 
-    # 2) 目录名前缀命中（短地址 → 全称）
+    # 2) Directory name prefix match
     pref = find_existing_run_by_prefix(outputs_root, run_id)
     if pref:
         return pref
 
-    # 3) 经纬度兜底（半径相等 + 坐标在容差内）
+    # 3) Coordinate fallback (same radius + within tolerance)
     if lat is None or lon is None or radius_m is None:
         return None
     root = Path(outputs_root)
@@ -134,19 +144,19 @@ def find_existing_run_smart(outputs_root: str, run_id: str,
 
 def normalize_address(address: str) -> str:
     """
-    标准化地址字符串，消除格式差异
+    Normalize address string to reduce formatting variations.
     """
     if not address:
         return ""
     
-    # 转换为小写
+    # Lowercase and strip
     normalized = address.lower().strip()
     
-    # 移除多余空格和标点
+    # Remove punctuation and extra whitespace
     normalized = re.sub(r'[^\w\s]', ' ', normalized)
     normalized = re.sub(r'\s+', ' ', normalized)
     
-    # 标准化街道缩写
+    # Standardize common street suffixes
     replacements = {
         r'\bstreet\b': 'st',
         r'\broad\b': 'rd', 
@@ -162,7 +172,7 @@ def normalize_address(address: str) -> str:
     for pattern, replacement in replacements.items():
         normalized = re.sub(pattern, replacement, normalized)
     
-    # 移除常见后缀（州、邮编、国家）
+    # Remove common suffixes (state, zip, country)
     normalized = re.sub(r',\s*(ny|new york|ca|california|us|usa)$', '', normalized)
     normalized = re.sub(r'\s*\d{5}(-\d{4})?$', '', normalized)
     
@@ -170,7 +180,7 @@ def normalize_address(address: str) -> str:
 
 def address_similarity(addr1: str, addr2: str) -> float:
     """
-    计算两个地址的相似度 (0-1)
+    Compute similarity score between two addresses (0 to 1).
     """
     norm1 = normalize_address(addr1)
     norm2 = normalize_address(addr2)
@@ -187,8 +197,8 @@ def find_existing_run_by_address(
     similarity_threshold: float = 0.8
 ) -> Optional[Tuple[str, str, str]]:
     """
-    通过地址相似度查找现有运行
-    返回: (outdir, manifest_path, run_id) 或 None
+    Find existing run by address similarity.
+    Returns: (outdir, manifest_path, run_id) or None
     """
     import json
     from pathlib import Path
@@ -201,12 +211,12 @@ def find_existing_run_by_address(
             with open(manifest_path, 'r') as f:
                 manifest = json.load(f)
             
-            # 检查半径是否匹配
+            # Check radius match
             manifest_radius = manifest.get("aoi_radius_m")
             if manifest_radius is None or abs(float(manifest_radius) - float(radius_m)) > 1e-6:
                 continue
             
-            # 检查地址相似度
+            # Check address similarity
             manifest_addr = manifest.get("address") or manifest.get("location_text", "")
             similarity = address_similarity(manifest_addr, address)
             
