@@ -1,37 +1,9 @@
-# 🌊 Flood Risk Rating of Properties: Terrain Analysis Pipeline
+# Flood Risk Rating of Properties: Terrain Analysis Pipeline
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688.svg)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![University](https://img.shields.io/badge/University%20of%20Chicago-MS%20Applied%20Data%20Science-800000.svg)](https://www.uchicago.edu/)
-
-**High-Resolution LiDAR-Based Flood Risk Assessment Using Micro-Topography Analysis**
-
-[📊 Demo](https://github.com/Ronniiie02/Terrain-analysis) | [📄 Documentation](#documentation) | [🚀 Quick Start](#quick-start) | [📧 Contact](#contact)
-
----
-
-## 📋 Table of Contents
-
-- [Overview](#-overview)
-- [Key Features](#-key-features)
-- [System Architecture](#-system-architecture)
-- [Installation](#-installation)
-- [Quick Start](#-quick-start)
-- [API Documentation](#-api-documentation)
-- [Core Pipeline Workflow](#-core-pipeline-workflow)
-- [Output Interpretation](#-output-interpretation)
-- [Examples](#-examples)
-- [Project Structure](#-project-structure)
-- [Technologies Used](#-technologies-used)
-- [Limitations & Scope](#-limitations--scope)
-- [Academic Context](#-academic-context)
-- [Contributing](#-contributing)
-- [Team](#-team)
-- [Acknowledgments](#-acknowledgments)
-- [License](#-license)
-
----
 
 ## 🎯 Overview
 
