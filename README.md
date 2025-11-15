@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![University](https://img.shields.io/badge/University%20of%20Chicago-MS%20Applied%20Data%20Science-800000.svg)](https://www.uchicago.edu/)
 
-## 🎯 Overview
+## Overview
 
 Property-scale flood risk is driven by **micro-topography** — tiny elevation differences that determine whether water drains away from a property or pools around it. Traditional tools (FEMA maps, coarse DEMs, zonal statistics) often miss these fine-scale patterns and cannot reliably distinguish a safe house on a ridge from a vulnerable house in a shallow bowl within the same flood zone.
 
@@ -17,7 +17,7 @@ This repository implements a **LiDAR-based geospatial analysis pipeline** that p
 - **Interactive web dashboard** for underwriting and risk analytics
 - **Interpretable metrics** complementing existing FEMA zones and proprietary models
 
-### 🎓 Academic Partnership
+### Academic Partnership
 
 This project is a collaboration between:
 - **Tokio Marine Highland (TMH)** - Industry partner providing domain expertise
@@ -25,7 +25,7 @@ This project is a collaboration between:
 
 ---
 
-## ✨ Key Features
+## Key Features
 
 ### **Automated DEM Generation**
 - 1m bare-earth DTM from LiDAR point clouds (USGS 3DEP)
