@@ -317,10 +317,10 @@ For radii [10, 50, 100, 200, 300, 500] meters:
 
 ### 6. **Risk Score Calculation** 
 Terrain-based flood susceptibility is computed from four core components:
-Global elevation risk — how low a pixel sits relative to the 500 m elevation distribution
-Depressional depth — degree to which the surface lies below the neighborhood median
-Flatness risk — flatter terrain is more prone to water pooling
-Directional exposure — orientation effects derived from aspect (sin/cos)
+- Global elevation risk — how low a pixel sits relative to the 500 m elevation distribution
+- Depressional depth — degree to which the surface lies below the neighborhood median
+- Flatness risk — flatter terrain is more prone to water pooling
+- Directional exposure — orientation effects derived from aspect (sin/cos)
 
 ```python
 # Composite risk formula
