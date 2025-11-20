@@ -195,7 +195,7 @@ from elevation.run_final_pipeline import PipelineConfig, run_pipeline
 
 # Configure the analysis
 config = PipelineConfig()
-config.lat = XXX  # Chicago coordinates
+config.lat = XXX  # Coordinates
 config.lon = XXX
 config.aoi_radius_m = 500.0
 config.output_dir = "./outputs/my_analysis"
@@ -249,11 +249,11 @@ Retrieve results for a specific run.
 {
   "run_id": "XXX",
   "status": "completed",
-  "house_ground_m": 182.4,
-  "percentile_rank": 13.7,
-  "terrain_risk_score": 0.73,
-  "risk_percentile": 85.2,
-  "manifest_path": "/outputs/chicago_20250115_143022/manifest.json"
+  "house_ground_m": XXX,
+  "percentile_rank": XXX,
+  "terrain_risk_score": XXX,
+  "risk_percentile": XXX,
+  "manifest_path": "/outputs/XXX/manifest.json"
 }
 ```
 
@@ -316,16 +316,21 @@ For radii [10, 50, 100, 200, 300, 500] meters:
 - Dominant drainage direction
 
 ### 6. **Risk Score Calculation** 
+Terrain-based flood susceptibility is computed from four core components:
+Global elevation risk — how low a pixel sits relative to the 500 m elevation distribution
+Depressional depth — degree to which the surface lies below the neighborhood median
+Flatness risk — flatter terrain is more prone to water pooling
+Directional exposure — orientation effects derived from aspect (sin/cos)
+
 ```python
 # Composite risk formula
-risk = w1 * global_elevation_risk + 
-       w2 * local_depression_risk + 
-       w3 * flatness_risk + 
-       w4 * flow_convergence_risk
+risk = w1 * global_elevation_risk \
+     + w2 * depression_risk \
+     + w3 * flatness_risk \
+     + w4 * directional_exposure_risk
 
-# Apply gamma correction for low-lying areas
-if global_percentile < 0.3:
-    risk = risk ** gamma
+A gamma transformation amplifies risk for extremely low-lying elevations:
+global_score = (1 - elevation_percentile) ** gamma
 ```
 
 ### 7. **Output Generation** 
