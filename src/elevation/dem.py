@@ -139,6 +139,13 @@ def build_dem_for_radius(
                 "resolution": resolution_m
             },
             {
+                "type": "filters.assign",
+                "value": [
+                    "ReturnNumber = 1 WHERE ReturnNumber == 0",
+                    "NumberOfReturns = 1 WHERE NumberOfReturns == 0"
+                ]
+            },
+            {
                 "type": "filters.smrf",
                 "window": 32.0,
                 "slope": 0.2,
