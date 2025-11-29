@@ -160,7 +160,7 @@ def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
             # Keep error message text as originally written (Chinese)
             raise RuntimeError(json.dumps({
                 "error_code": "GEOCODING_FAILED",
-                "message": f"无法解析地址: {config.address}",
+                "message": f"Unable to resolve address: {config.address}",
                 "address": config.address
             }))
         config.lat, config.lon = float(lat), float(lon)
